@@ -1,0 +1,210 @@
+import FirebaseStorage
+import Foundation
+
+/// Handles onboarding progress and temporary user input.
+@MainActor
+final class OnboardingViewModel: ObservableObject {
+    @Published var username: String = ""
+    @Published var selectedAccountType: AccountType = .artist {
+        didSet {
+            guard selectedAccountType != oldValue else { return }
+            syncPrimaryOptionsFromStoredValue()
+
+            if selectedAccountType == .studioOwner && oldValue != .studioOwner {
+                selectedPrimaryOptions = []
+                fieldOne = ""
+                fieldTwo = ""
+            }
+
+            if oldValue == .studioOwner && selectedAccountType != .studioOwner {
+                fieldTwo = ""
+            }
+
+            if (selectedAccountType == .artist || selectedAccountType == .engineer) && oldValue != selectedAccountType {
+                selectedPrimaryOptions = []
+            }
+        }
+    }
+    @Published var fieldOne: String = ""
+    @Published var fieldTwo: String = ""
+    @Published var publicBio: String = ""
+    @Published var isSaving = false
+    @Published var errorMessage: String?
+    @Published var didSave = false
+    @Published var selectedPrimaryOptions: [String] = [] {
+        didSet {
+            if selectedAccountType == .artist || selectedAccountType == .engineer {
+                fieldOne = selectedPrimaryOptions.joined(separator: ", ")
+            }
+        }
+    }
+
+    private let appState: AppState
+    private let firestoreService: any FirestoreService
+    private let storageService: any StorageService
+    let canEditAccountType: Bool
+
+    init(appState: AppState, firestoreService: any FirestoreService, storageService: any StorageService) {
+        self.appState = appState
+        self.firestoreService = firestoreService
+        self.storageService = storageService
+        self.canEditAccountType = !appState.hasCompletedOnboarding
+
+        if let profile = appState.currentUser {
+            username = profile.username
+            selectedAccountType = profile.accountType
+            fieldOne = profile.profileDetails.fieldOne
+            fieldTwo = profile.profileDetails.fieldTwo
+            publicBio = profile.profileDetails.bio
+        }
+
+        syncPrimaryOptionsFromStoredValue()
+    }
+
+    var fieldOneLabel: String { selectedAccountType.requiredFieldLabels.first ?? "Details" }
+    var fieldTwoLabel: String { selectedAccountType.requiredFieldLabels.last ?? "More details" }
+
+    var isContinueEnabled: Bool {
+        let trimmedUsername = username.trimmed
+        let trimmedFieldTwo = fieldTwo.trimmed
+        let trimmedBio = publicBio.trimmed
+        switch selectedAccountType {
+        case .studioOwner:
+            let trimmedFieldOne = fieldOne.trimmed
+            return !trimmedUsername.isEmpty && !trimmedFieldOne.isEmpty && !trimmedFieldTwo.isEmpty && !trimmedBio.isEmpty
+        case .artist, .engineer:
+            return !trimmedUsername.isEmpty && !selectedPrimaryOptions.isEmpty && !trimmedFieldTwo.isEmpty && !trimmedBio.isEmpty
+        }
+    }
+
+    func saveProfile(profileImageData: Data?, profileImageContentType: String, removeProfileImage: Bool) async {
+        guard isContinueEnabled else { return }
+        guard let existingProfile = appState.currentUser else { return }
+
+        if let data = profileImageData, data.count >= 8 * 1024 * 1024 {
+            errorMessage = "Profile image must be smaller than 8 MB."
+            return
+        }
+
+        isSaving = true
+        errorMessage = nil
+        didSave = false
+
+        let trimmedUsername = username.trimmed
+        let primaryValue: String
+        switch selectedAccountType {
+        case .studioOwner:
+            primaryValue = fieldOne.trimmed
+        case .artist, .engineer:
+            primaryValue = selectedPrimaryOptions.joined(separator: ", ")
+        }
+
+        var updatedProfile = existingProfile
+        updatedProfile.username = trimmedUsername
+        if existingProfile.displayName.isEmpty {
+            updatedProfile.displayName = trimmedUsername
+        }
+        updatedProfile.accountType = selectedAccountType
+        updatedProfile.profileDetails = AccountProfileDetails(
+            bio: publicBio.trimmed,
+            fieldOne: primaryValue,
+            fieldTwo: fieldTwo.trimmed
+        )
+
+        var resolvedProfileImageURL = existingProfile.profileImageURL
+
+        if removeProfileImage {
+            do {
+                try await deleteFileIfExists(path: profileImagePath(for: existingProfile.id))
+                resolvedProfileImageURL = nil
+            } catch {
+                errorMessage = error.localizedDescription
+                isSaving = false
+                return
+            }
+        } else if let data = profileImageData {
+            do {
+                resolvedProfileImageURL = try await storageService.uploadImage(
+                    data: data,
+                    path: profileImagePath(for: existingProfile.id),
+                    contentType: profileImageContentType
+                )
+            } catch {
+                errorMessage = error.localizedDescription
+                isSaving = false
+                return
+            }
+        }
+
+        updatedProfile.profileImageURL = resolvedProfileImageURL
+
+        do {
+            try await firestoreService.saveUserProfile(updatedProfile)
+            appState.currentUser = updatedProfile
+            appState.hasCompletedOnboarding = true
+            didSave = true
+            Logger.log("Onboarding completed for username: \(updatedProfile.username) as \(updatedProfile.accountType.title)")
+        } catch {
+            errorMessage = error.localizedDescription
+            Logger.log("Onboarding save failed: \(error.localizedDescription)")
+        }
+
+        isSaving = false
+    }
+
+    func setPrimaryOptions(_ options: [String]) {
+        selectedPrimaryOptions = options
+    }
+
+    func setLocation(_ displayName: String) {
+        fieldTwo = displayName
+    }
+
+    func primaryOptions(for accountType: AccountType) -> [String] {
+        switch accountType {
+        case .artist, .engineer:
+            return ProfileOptions.genres
+        case .studioOwner:
+            return []
+        }
+    }
+
+    func primaryOptionsLimit(for accountType: AccountType) -> Int {
+        switch accountType {
+        case .artist, .engineer:
+            return 3
+        case .studioOwner:
+            return 0
+        }
+    }
+
+    private func syncPrimaryOptionsFromStoredValue() {
+        guard selectedAccountType == .artist || selectedAccountType == .engineer else {
+            selectedPrimaryOptions = []
+            return
+        }
+
+        let tokens = fieldOne
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        selectedPrimaryOptions = tokens
+    }
+
+    private func deleteFileIfExists(path: String) async throws {
+        do {
+            try await storageService.deleteFile(at: path)
+        } catch {
+            if let storageError = error as NSError?,
+               storageError.domain == StorageErrorDomain,
+               StorageErrorCode(rawValue: storageError.code) == .objectNotFound {
+                return
+            }
+            throw error
+        }
+    }
+
+    private func profileImagePath(for userId: String) -> String {
+        "profiles/\(userId)/avatar.jpg"
+    }
+}

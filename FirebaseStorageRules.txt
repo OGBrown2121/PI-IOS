@@ -1,0 +1,92 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function studioDocument(studioId) {
+      return firestore.get(/databases/(default)/documents/studios/$(studioId));
+    }
+
+    function isStudioOwner(studioId) {
+      return isSignedIn() && studioDocument(studioId).data.ownerId == request.auth.uid;
+    }
+
+    function isValidStudioAsset(fileName) {
+      return fileName == "cover.jpg" || fileName == "logo.jpg";
+    }
+
+    function isProfileOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidProfileAsset(fileName) {
+      return fileName == "avatar.jpg" || fileName == "banner.jpg";
+    }
+
+    function conversationDocument(conversationId) {
+      return firestore.get(/databases/(default)/documents/conversations/$(conversationId));
+    }
+
+    function isConversationParticipant(conversation) {
+      return isSignedIn()
+        && conversation.data != null
+        && conversation.data.participantIds != null
+        && conversation.data.participantIds.hasAny([request.auth.uid]);
+    }
+
+    function canAccessChatMedia(conversationId) {
+      let conversation = conversationDocument(conversationId);
+      return isConversationParticipant(conversation);
+    }
+
+    function canUploadChatMedia(conversationId) {
+      return canAccessChatMedia(conversationId)
+        && request.resource != null
+        && request.resource.size < 10 * 1024 * 1024
+        && request.resource.contentType.matches('image/.+');
+    }
+
+    match /studios/{studioId}/{fileName} {
+      // Everyone can view studio media that already exists.
+      allow read: if resource != null;
+
+      // Owners can upload or overwrite their assets with image files only.
+      allow create, update: if isStudioOwner(studioId)
+        && isValidStudioAsset(fileName)
+        && request.resource != null
+        && request.resource.size < 8 * 1024 * 1024
+        && request.resource.contentType.matches('image/.+');
+
+      // Owners can remove their own assets.
+      allow delete: if isStudioOwner(studioId);
+    }
+
+    match /profiles/{userId}/{fileName} {
+      // Everyone can view profile media that already exists.
+      allow read: if resource != null;
+
+      // Owners can upload or update their profile media with images under 8 MB.
+      allow create, update: if isProfileOwner(userId)
+        && isValidProfileAsset(fileName)
+        && request.resource != null
+        && request.resource.size < 8 * 1024 * 1024
+        && request.resource.contentType.matches('image/.+');
+
+      // Owners can remove their own profile media.
+      allow delete: if isProfileOwner(userId);
+    }
+
+    match /chat-media/{conversationId}/{messageId}/{fileName} {
+      allow read, delete: if resource != null && canAccessChatMedia(conversationId);
+      allow create: if canUploadChatMedia(conversationId);
+      allow update: if false;
+    }
+
+    // Deny everything else by default.
+    match /{path=**} {
+      allow read, write: if false;
+    }
+  }
+}

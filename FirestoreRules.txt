@@ -1,0 +1,194 @@
+// firestore.rules
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(ownerId) {
+      return isSignedIn() && request.auth.uid == ownerId;
+    }
+
+    function participantIds(data) {
+      return data.participantIds is list
+          ? data.participantIds
+          : data.participants is list
+              ? data.participants.map(participant, participant.id)
+              : data.participants is map
+                  ? data.participants.keys()
+                  : [];
+    }
+
+    function senderId(data) {
+      return data.senderId != null
+          ? data.senderId
+          : data.sender is map && data.sender.id is string
+              ? data.sender.id
+              : null;
+    }
+
+    function isConversationParticipant(data) {
+      return isSignedIn()
+          && data != null
+          && participantIds(data).hasAny([request.auth.uid]);
+    }
+
+    function isConversationCreator(data) {
+      return isSignedIn() && data.creatorId == request.auth.uid;
+    }
+
+    function allowsParticipantEditing(data) {
+      return data.groupSettings != null && data.groupSettings.allowsParticipantEditing == true;
+    }
+
+    function validGroupSettings(settings) {
+      return settings == null || settings.allowsParticipantEditing == true || settings.allowsParticipantEditing == false;
+    }
+
+    function validParticipantCount(data) {
+      return (data.kind == 'direct' && participantIds(data).size() == 2)
+          || (data.kind == 'group' && participantIds(data).size() >= 2);
+    }
+
+    function validConversationBase(data) {
+      return data.kind in ['direct', 'group']
+          && validParticipantCount(data)
+          && validGroupSettings(data.groupSettings);
+    }
+
+    function validConversationCreate(data) {
+      return isSignedIn()
+          && data.participantIds is list
+          && validConversationBase(data)
+          && participantIds(data).hasAny([request.auth.uid]);
+    }
+
+    function groupSettingsChanged(before, after) {
+      return before.groupSettings != after.groupSettings;
+    }
+
+    function validConversationUpdate(before, after) {
+      return isSignedIn() && isConversationParticipant(before);
+    }
+
+    function getConversation(conversationId) {
+      return get(/databases/$(database)/documents/conversations/$(conversationId));
+    }
+
+    function canAccessConversation(conversationId) {
+      let conversation = getConversation(conversationId);
+      return conversation.exists && isConversationParticipant(conversation.data);
+    }
+
+    function canCreateMessage(conversationId, data) {
+      let conversation = getConversation(conversationId);
+      let resolvedSenderId = senderId(data);
+      return isSignedIn()
+          && conversation.exists
+          && isConversationParticipant(conversation.data)
+          && (resolvedSenderId == null || resolvedSenderId == request.auth.uid);
+    }
+
+    function getStudio(studioId) {
+      return get(/databases/$(database)/documents/studios/$(studioId));
+    }
+
+    function isStudioOwnerById(studioId) {
+      let studio = getStudio(studioId);
+      return studio.exists && isOwner(studio.data.ownerId);
+    }
+
+    function isEngineerRequestOwner(resource, requestId) {
+      return isSignedIn() && (
+        requestId == request.auth.uid
+        || (resource != null && resource.data.engineerId == request.auth.uid)
+      );
+    }
+
+    function hasField(data, fieldName) {
+      return data.keys().hasAny([fieldName]);
+    }
+
+    function resolvedOwnerId(before, after, studioId) {
+      return hasField(after, 'studioOwnerId')
+          ? after.studioOwnerId
+          : hasField(before, 'studioOwnerId')
+              ? before.studioOwnerId
+              : getStudio(studioId).data.ownerId;
+    }
+
+    function validEngineerRequestStatus(status) {
+      return status in ['pending', 'accepted', 'denied'];
+    }
+
+    function validEngineerRequestCreate(data, studioId) {
+      return data.keys().hasOnly(['engineerId', 'studioOwnerId', 'status', 'createdAt', 'updatedAt'])
+          && data.engineerId is string
+          && data.engineerId == request.auth.uid
+          && data.studioOwnerId is string
+          && data.studioOwnerId == getStudio(studioId).data.ownerId
+          && data.status == 'pending'
+          && data.createdAt is timestamp
+          && data.updatedAt is timestamp;
+    }
+
+    function validEngineerRequestOwnerUpdate(before, after, studioId) {
+      let studio = getStudio(studioId);
+      return resolvedOwnerId(before, after, studioId) == studio.data.ownerId
+          && before.engineerId == after.engineerId
+          && before.createdAt == after.createdAt
+          && hasField(after, 'status') && validEngineerRequestStatus(after.status)
+          && hasField(after, 'updatedAt') && after.updatedAt is timestamp;
+    }
+
+    function validEngineerRequestEngineerUpdate(before, after, studioId) {
+      let studio = getStudio(studioId);
+      return resolvedOwnerId(before, after, studioId) == studio.data.ownerId
+          && before.engineerId == after.engineerId
+          && before.engineerId == request.auth.uid
+          && before.createdAt == after.createdAt
+          && hasField(after, 'status') && after.status == 'pending'
+          && before.status in ['pending', 'denied']
+          && hasField(after, 'updatedAt') && after.updatedAt is timestamp;
+    }
+
+    match /profiles/{userId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    match /studios/{studioId} {
+      allow read: if true;
+      allow create: if isSignedIn() && request.resource.data.ownerId == request.auth.uid;
+      allow update, delete: if resource != null && isOwner(resource.data.ownerId);
+
+      match /engineerRequests/{requestId} {
+        allow read: if isStudioOwnerById(studioId)
+            || isEngineerRequestOwner(resource, requestId);
+        allow create: if isSignedIn()
+            && requestId == request.auth.uid
+            && validEngineerRequestCreate(request.resource.data, studioId);
+        allow update: if (isStudioOwnerById(studioId) && validEngineerRequestOwnerUpdate(resource.data, request.resource.data, studioId))
+            || (isEngineerRequestOwner(resource, requestId) && validEngineerRequestEngineerUpdate(resource.data, request.resource.data, studioId));
+        allow delete: if isStudioOwnerById(studioId)
+            || isEngineerRequestOwner(resource, requestId);
+      }
+    }
+
+    match /conversations/{conversationId} {
+      allow list: if isSignedIn();
+      allow read: if resource != null && isConversationParticipant(resource.data);
+      allow create: if validConversationCreate(request.resource.data);
+      allow update: if resource != null && validConversationUpdate(resource.data, request.resource.data);
+      allow delete: if resource != null && isConversationCreator(resource.data);
+
+      match /messages/{messageId} {
+        allow list: if isSignedIn();
+        allow read: if canAccessConversation(conversationId);
+        allow create: if canCreateMessage(conversationId, request.resource.data);
+        allow update, delete: if false;
+      }
+    }
+  }
+}
