@@ -3,13 +3,17 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(\.di) private var di
     @EnvironmentObject private var appState: AppState
-    @StateObject private var viewModel: SettingsViewModel
+    @StateObject private var settingsViewModel: SettingsViewModel
+    @StateObject private var studiosViewModel: StudiosViewModel
     @State private var isPresentingProfileEditor = false
+    @State private var isManagingStudio = false
+    @State private var studioToEdit: Studio?
     @State private var toastMessage: String?
     @State private var toastDismissTask: Task<Void, Never>?
 
-    init(viewModel: SettingsViewModel) {
-        _viewModel = StateObject(wrappedValue: viewModel)
+    init(viewModel: SettingsViewModel, studiosViewModel: StudiosViewModel) {
+        _settingsViewModel = StateObject(wrappedValue: viewModel)
+        _studiosViewModel = StateObject(wrappedValue: studiosViewModel)
     }
 
     var body: some View {
@@ -18,6 +22,9 @@ struct SettingsView: View {
                 if let profile = appState.currentUser {
                     profileSummarySection(profile)
                     profileActionsSection(profile)
+                    if profile.accountType == .studioOwner {
+                        ownerToolsSection
+                    }
                 }
 
                 managementSection
@@ -29,10 +36,31 @@ struct SettingsView: View {
         }
         .refreshable {
             let refreshed = await reloadProfile()
-            await MainActor.run { showToast(refreshed ? "Profile updated" : "Up to date") }
+            await MainActor.run { showToast(refreshed ? "Details updated" : "Up to date") }
         }
         .toast(message: $toastMessage, bottomInset: 120)
-        .onDisappear { toastDismissTask?.cancel() }
+        .task {
+            if isOwner {
+                studiosViewModel.listenForStudios()
+            }
+        }
+        .onReceive(studiosViewModel.$studios) { _ in
+            guard isManagingStudio else { return }
+            if let updatedStudio = ownedStudio {
+                studioToEdit = updatedStudio
+            }
+        }
+        .onChange(of: appState.currentUser?.accountType) { newValue in
+            if newValue == .studioOwner {
+                studiosViewModel.listenForStudios()
+            } else {
+                studiosViewModel.stopListening()
+            }
+        }
+        .onDisappear {
+            toastDismissTask?.cancel()
+            studiosViewModel.stopListening()
+        }
         .sheet(isPresented: $isPresentingProfileEditor) {
             NavigationStack {
                 OnboardingView(
@@ -45,6 +73,34 @@ struct SettingsView: View {
                 )
                 .navigationTitle("Edit Profile")
                 .navigationBarTitleDisplayMode(.inline)
+            }
+        }
+        .sheet(isPresented: $isManagingStudio, onDismiss: { studioToEdit = nil }) {
+            NavigationStack {
+                StudioEditorView(existingStudio: studioToEdit) { data in
+                    guard let ownerId = appState.currentUser?.id else {
+                        return "You need to be signed in to manage a studio."
+                    }
+
+                    return await studiosViewModel.saveStudio(
+                        name: data.name,
+                        city: data.city,
+                        ownerId: ownerId,
+                        studioId: studioToEdit?.id,
+                        address: data.address,
+                        hourlyRate: data.numericHourlyRate,
+                        rooms: data.numericRooms,
+                        amenities: data.amenitiesList,
+                        coverImageData: data.newCoverImageData,
+                        logoImageData: data.newLogoImageData,
+                        coverImageContentType: data.coverImageContentType,
+                        logoImageContentType: data.logoImageContentType,
+                        existingCoverURL: data.existingCoverURL,
+                        existingLogoURL: data.existingLogoURL,
+                        removeCoverImage: data.removeCoverImage,
+                        removeLogoImage: data.removeLogoImage
+                    )
+                }
             }
         }
     }
@@ -82,6 +138,39 @@ private extension SettingsView {
         }
     }
 
+    var ownerToolsSection: some View {
+        VStack(alignment: .leading, spacing: Theme.spacingMedium) {
+            Text("Owner Tools")
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            Button {
+                studioToEdit = ownedStudio
+                isManagingStudio = true
+            } label: {
+                OwnerToolsActionCard(
+                    title: ownedStudio == nil ? "Add Your Studio" : "Manage Your Studio",
+                    icon: ownedStudio == nil ? "building.2" : "slider.horizontal.3",
+                    chevron: false
+                )
+            }
+            .buttonStyle(.plain)
+
+            if let managedStudio = ownedStudio {
+                NavigationLink {
+                    EngineerRequestsView(studio: managedStudio, firestoreService: di.firestoreService)
+                } label: {
+                    OwnerToolsActionCard(
+                        title: "Engineer Requests",
+                        icon: "person.crop.circle.badge.questionmark",
+                        chevron: true
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
     var managementSection: some View {
         VStack(alignment: .leading, spacing: Theme.spacingMedium) {
             Text("Account")
@@ -89,7 +178,7 @@ private extension SettingsView {
                 .foregroundStyle(.secondary)
 
             Button(role: .destructive) {
-                viewModel.signOut()
+                settingsViewModel.signOut()
             } label: {
                 Text("Sign Out")
                     .fullWidth(alignment: .center)
@@ -135,16 +224,27 @@ private extension SettingsView {
     }
 
     func reloadProfile() async -> Bool {
-        guard let userId = appState.currentUser?.id else { return false }
-        do {
-            if let refreshed = try await di.firestoreService.loadUserProfile(for: userId) {
-                appState.currentUser = refreshed
-                return true
+        var didUpdate = false
+
+        if let userId = appState.currentUser?.id {
+            do {
+                if let refreshed = try await di.firestoreService.loadUserProfile(for: userId) {
+                    appState.currentUser = refreshed
+                    didUpdate = true
+                }
+            } catch {
+                Logger.log("Failed to refresh profile: \(error.localizedDescription)")
             }
-        } catch {
-            Logger.log("Failed to refresh profile: \(error.localizedDescription)")
         }
-        return false
+
+        let studiosRefreshed: Bool
+        if isOwner {
+            studiosRefreshed = await studiosViewModel.refreshStudios()
+        } else {
+            studiosViewModel.stopListening()
+            studiosRefreshed = false
+        }
+        return didUpdate || studiosRefreshed
     }
 
     @MainActor
@@ -157,6 +257,15 @@ private extension SettingsView {
                 withAnimation { toastMessage = nil }
             }
         }
+    }
+
+    var ownedStudio: Studio? {
+        guard let ownerId = appState.currentUser?.id else { return nil }
+        return studiosViewModel.studios.first { $0.ownerId == ownerId }
+    }
+
+    var isOwner: Bool {
+        appState.currentUser?.accountType == .studioOwner
     }
 }
 
@@ -228,10 +337,89 @@ private struct SettingsActionCard: View {
     }
 }
 
+private struct OwnerToolsActionCard: View {
+    let title: String
+    let icon: String
+    var chevron: Bool = true
+
+    private var isPrimaryAction: Bool { !chevron }
+
+    var body: some View {
+        HStack(spacing: Theme.spacingMedium) {
+            Image(systemName: icon)
+                .font(.headline)
+                .foregroundStyle(iconColor)
+            Text(title)
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(textColor)
+            Spacer()
+            if chevron {
+                Image(systemName: "chevron.right")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, Theme.spacingMedium)
+        .padding(.vertical, Theme.spacingSmall + 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(glassBackground)
+        .overlay(glassBorder)
+        .shadow(color: Color.black.opacity(0.25), radius: 16, y: 10)
+    }
+
+    private var glassBackground: some View {
+        RoundedRectangle(cornerRadius: 22, style: .continuous)
+            .fill(.ultraThinMaterial)
+            .overlay(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .fill(primaryTint)
+            )
+    }
+
+    private var glassBorder: some View {
+        RoundedRectangle(cornerRadius: 22, style: .continuous)
+            .stroke(borderGradient, lineWidth: isPrimaryAction ? 1.6 : 1.0)
+    }
+
+    private var primaryTint: LinearGradient {
+        LinearGradient(
+            colors: isPrimaryAction
+                ? [Theme.primaryGradientStart.opacity(0.32), Theme.primaryGradientEnd.opacity(0.32)]
+                : [Color.white.opacity(0.08), Color.white.opacity(0.04)],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
+
+    private var borderGradient: LinearGradient {
+        LinearGradient(
+            colors: isPrimaryAction
+                ? [Color.white.opacity(0.55), Theme.primaryGradientEnd.opacity(0.55)]
+                : [Color.white.opacity(0.35), Color.white.opacity(0.12)],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
+
+    private var textColor: Color {
+        isPrimaryAction ? Color.white.opacity(0.96) : .primary
+    }
+
+    private var iconColor: Color {
+        isPrimaryAction ? Color.white.opacity(0.96) : Theme.primaryColor.opacity(0.9)
+    }
+}
+
 #Preview("Settings") {
     let appState = AppState()
     appState.currentUser = UserProfile.mock
-    return SettingsView(viewModel: SettingsViewModel(authService: MockAuthService(), appState: appState))
-        .environmentObject(appState)
-        .environment(\.di, DIContainer.makeMock())
+    return SettingsView(
+        viewModel: SettingsViewModel(authService: MockAuthService(), appState: appState),
+        studiosViewModel: StudiosViewModel(
+            firestoreService: MockFirestoreService(),
+            storageService: MockStorageService()
+        )
+    )
+    .environmentObject(appState)
+    .environment(\.di, DIContainer.makeMock())
 }

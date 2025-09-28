@@ -41,42 +41,65 @@ private struct MainTabView: View {
     @Environment(\.di) private var di
     @EnvironmentObject private var appState: AppState
     @State private var selectedTab: Tab = .studios
+    @State private var studiosPath = NavigationPath()
+    @State private var chatPath = NavigationPath()
+    @State private var bookPath = NavigationPath()
+    @State private var settingsPath = NavigationPath()
+    @State private var tabBarHeight: CGFloat = 0
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            TabView(selection: $selectedTab) {
-                NavigationStack {
-                    StudioListView(viewModel: StudiosViewModel(
-                        firestoreService: di.firestoreService,
-                        storageService: di.storageService
-                    ))
-                }
-                .tag(Tab.studios)
-
-                NavigationStack {
-                    ThreadsView(viewModel: ChatViewModel(chatService: di.chatService, appState: appState))
-                }
-                .tag(Tab.chat)
-
-                NavigationStack {
-                    BookingPlaceholderView()
-                        .navigationTitle("Bookings")
-                        .navigationBarTitleDisplayMode(.inline)
-                }
-                .tag(Tab.book)
-
-                NavigationStack {
-                    SettingsView(viewModel: SettingsViewModel(authService: di.authService, appState: appState))
-                }
-                .tag(Tab.settings)
-            }
-            .toolbar(.hidden, for: .tabBar)
+            content(for: selectedTab)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(.bottom, tabBarHeight)
 
             LiquidTabBar(selectedTab: $selectedTab)
                 .padding(.horizontal, 20)
                 .padding(.bottom, 10)
+                .overlay {
+                    GeometryReader { proxy in
+                        Color.clear
+                            .preference(key: TabBarHeightPreferenceKey.self, value: proxy.size.height)
+                    }
+                    .allowsHitTesting(false)
+                }
         }
-        .ignoresSafeArea(.keyboard, edges: .bottom)
+        .onPreferenceChange(TabBarHeightPreferenceKey.self) { newValue in
+            tabBarHeight = newValue
+        }
+    }
+
+    @ViewBuilder
+    private func content(for tab: Tab) -> some View {
+        switch tab {
+        case .studios:
+            NavigationStack(path: $studiosPath) {
+                StudioListView(viewModel: StudiosViewModel(
+                    firestoreService: di.firestoreService,
+                    storageService: di.storageService
+                ))
+            }
+        case .chat:
+            NavigationStack(path: $chatPath) {
+                ThreadsView(viewModel: ChatViewModel(chatService: di.chatService, appState: appState))
+            }
+        case .book:
+            NavigationStack(path: $bookPath) {
+                BookingPlaceholderView()
+                    .navigationTitle("Bookings")
+                    .navigationBarTitleDisplayMode(.inline)
+            }
+        case .settings:
+            NavigationStack(path: $settingsPath) {
+                SettingsView(
+                    viewModel: SettingsViewModel(authService: di.authService, appState: appState),
+                    studiosViewModel: StudiosViewModel(
+                        firestoreService: di.firestoreService,
+                        storageService: di.storageService
+                    )
+                )
+            }
+        }
     }
 
     fileprivate enum Tab: String, CaseIterable, Hashable {
@@ -102,7 +125,16 @@ private struct MainTabView: View {
     }
 }
 
+private enum TabBarHeightPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat { 0 }
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
 private struct LiquidTabBar: View {
+    @Environment(\.colorScheme) private var colorScheme
     @Binding var selectedTab: MainTabView.Tab
 
     var body: some View {
@@ -117,15 +149,24 @@ private struct LiquidTabBar: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
-        .background(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 22, style: .continuous)
-                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
-                )
-                .shadow(color: Color.black.opacity(0.3), radius: 18, y: 14)
-        )
+        .background(.ultraThinMaterial, in: backgroundShape)
+        .overlay {
+            backgroundShape
+                .stroke(Color.white.opacity(0.18), lineWidth: 1)
+        }
+        .overlay(alignment: .top) {
+            backgroundShape
+                .stroke(Color.white.opacity(overlayOpacity), lineWidth: 0.6)
+        }
+        .clipShape(backgroundShape)
+    }
+
+    private var overlayOpacity: Double {
+        colorScheme == .dark ? 0.06 : 0.12
+    }
+
+    private var backgroundShape: RoundedRectangle {
+        .init(cornerRadius: 22, style: .continuous)
     }
 }
 
@@ -179,7 +220,10 @@ private struct LiquidTabBarItem: View {
                 RoundedRectangle(cornerRadius: 20, style: .continuous)
                     .stroke(borderColor, lineWidth: isSelected ? 0.9 : 0.45)
             )
-            .shadow(color: shadowColor, radius: isSelected ? 7 : 4, y: isSelected ? 4 : 2)
+            .overlay(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .stroke(Color.white.opacity(isSelected ? 0.18 : 0), lineWidth: 0.5)
+            )
     }
 
     private var activeColors: [Color] {
@@ -200,9 +244,5 @@ private struct LiquidTabBarItem: View {
 
     private var borderColor: Color {
         isSelected ? Theme.primaryGradientEnd.opacity(0.5) : Color.white.opacity(0.12)
-    }
-
-    private var shadowColor: Color {
-        isSelected ? Theme.primaryGradientEnd.opacity(0.28) : Color.black.opacity(0.2)
     }
 }
