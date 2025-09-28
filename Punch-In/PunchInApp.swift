@@ -1,4 +1,5 @@
 import FirebaseCore
+import FirebaseFirestore
 import GoogleSignIn
 import SwiftUI
 
@@ -11,6 +12,7 @@ struct PunchInApp: App {
     init() {
         if FirebaseApp.app() == nil {
             FirebaseApp.configure()
+            Firestore.enableLogging(true)
         }
         container = DIContainer.makeDefault()
     }

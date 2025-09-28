@@ -78,15 +78,18 @@ service cloud.firestore {
 
     function canAccessConversation(conversationId) {
       let conversation = getConversation(conversationId);
-      return conversation.exists && isConversationParticipant(conversation.data);
+      let conversationData = conversation.data;
+      return conversationData != null
+          && isConversationParticipant(conversationData);
     }
 
     function canCreateMessage(conversationId, data) {
       let conversation = getConversation(conversationId);
+      let conversationData = conversation.data;
       let resolvedSenderId = senderId(data);
       return isSignedIn()
-          && conversation.exists
-          && isConversationParticipant(conversation.data)
+          && conversationData != null
+          && isConversationParticipant(conversationData)
           && (resolvedSenderId == null || resolvedSenderId == request.auth.uid);
     }
 
@@ -96,7 +99,10 @@ service cloud.firestore {
 
     function isStudioOwnerById(studioId) {
       let studio = getStudio(studioId);
-      return studio.exists && isOwner(studio.data.ownerId);
+      return studio.exists
+          && studio.data != null
+          && studio.data.ownerId is string
+          && studio.data.ownerId == request.auth.uid;
     }
 
     function isEngineerRequestOwner(resource, requestId) {
@@ -104,6 +110,13 @@ service cloud.firestore {
         requestId == request.auth.uid
         || (resource != null && resource.data.engineerId == request.auth.uid)
       );
+    }
+
+    function isEngineerRequestForCurrentOwner(data) {
+      return data != null
+          && hasField(data, 'studioOwnerId')
+          && data.studioOwnerId is string
+          && data.studioOwnerId == request.auth.uid;
     }
 
     function hasField(data, fieldName) {
@@ -133,9 +146,8 @@ service cloud.firestore {
           && data.updatedAt is timestamp;
     }
 
-    function validEngineerRequestOwnerUpdate(before, after, studioId) {
-      let studio = getStudio(studioId);
-      return resolvedOwnerId(before, after, studioId) == studio.data.ownerId
+    function validEngineerRequestOwnerUpdate(before, after) {
+      return before != null
           && before.engineerId == after.engineerId
           && before.createdAt == after.createdAt
           && hasField(after, 'status') && validEngineerRequestStatus(after.status)
@@ -164,12 +176,15 @@ service cloud.firestore {
       allow update, delete: if resource != null && isOwner(resource.data.ownerId);
 
       match /engineerRequests/{requestId} {
+        allow list: if isSignedIn();
         allow read: if isStudioOwnerById(studioId)
+            || (resource != null && isEngineerRequestForCurrentOwner(resource.data))
             || isEngineerRequestOwner(resource, requestId);
         allow create: if isSignedIn()
             && requestId == request.auth.uid
             && validEngineerRequestCreate(request.resource.data, studioId);
-        allow update: if (isStudioOwnerById(studioId) && validEngineerRequestOwnerUpdate(resource.data, request.resource.data, studioId))
+        allow update: if (isEngineerRequestForCurrentOwner(resource.data) && validEngineerRequestOwnerUpdate(resource.data, request.resource.data))
+            || (isStudioOwnerById(studioId) && validEngineerRequestOwnerUpdate(resource.data, request.resource.data))
             || (isEngineerRequestOwner(resource, requestId) && validEngineerRequestEngineerUpdate(resource.data, request.resource.data, studioId));
         allow delete: if isStudioOwnerById(studioId)
             || isEngineerRequestOwner(resource, requestId);
