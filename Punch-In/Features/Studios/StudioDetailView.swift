@@ -17,12 +17,18 @@ struct StudioDetailView: View {
     @State private var isCancellingRequest = false
     @State private var requestErrorMessage: String?
     @State private var observedApprovedEngineerIds: [String]?
+    @State private var isBookingPresented = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.spacingLarge) {
                 heroHeader
                 quickStatsCard
+                if canCurrentUserBook {
+                    PrimaryButton(title: "Book this studio") {
+                        isBookingPresented = true
+                    }
+                }
                 engineerActionSection
                 availableEngineersSection
                 amenitiesSection
@@ -42,6 +48,13 @@ struct StudioDetailView: View {
         .onChange(of: studio.approvedEngineerIds) { ids in
             updateEngineerStatusCache(with: ids)
             Task { await loadAcceptedEngineersIfNeeded(force: true) }
+        }
+        .sheet(isPresented: $isBookingPresented) {
+            BookingFlowView(
+                studio: studio,
+                bookingService: di.bookingService,
+                currentUserProvider: { appState.currentUser }
+            )
         }
     }
 
@@ -157,6 +170,11 @@ struct StudioDetailView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
+    }
+
+    private var canCurrentUserBook: Bool {
+        guard let user = appState.currentUser else { return false }
+        return user.accountType == .artist
     }
 
     @ViewBuilder

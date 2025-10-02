@@ -11,6 +11,7 @@ struct DIContainer {
     let storageService: any StorageService
     let paymentsService: any PaymentsService
     let chatService: any ChatService
+    let bookingService: any BookingService
 
     @MainActor
     static func makeDefault() -> DIContainer {
@@ -22,27 +23,31 @@ struct DIContainer {
             return makeMock()
         }
 
+        let firestore = FirebaseFirestoreService()
         return DIContainer(
             authService: FirebaseAuthService(),
-            firestoreService: FirebaseFirestoreService(),
+            firestoreService: firestore,
             storageService: FirebaseStorageService(),
             paymentsService: MockPaymentsService(),
             chatService: FirestoreChatService(
                 firestore: Firestore.firestore(),
                 storage: Storage.storage(),
                 currentUserId: { Auth.auth().currentUser?.uid }
-            )
+            ),
+            bookingService: DefaultBookingService(firestore: firestore)
         )
     }
 
     @MainActor
     static func makeMock() -> DIContainer {
-        DIContainer(
+        let firestore = MockFirestoreService()
+        return DIContainer(
             authService: MockAuthService(),
-            firestoreService: MockFirestoreService(),
+            firestoreService: firestore,
             storageService: MockStorageService(),
             paymentsService: MockPaymentsService(),
-            chatService: MockChatService()
+            chatService: MockChatService(),
+            bookingService: DefaultBookingService(firestore: firestore)
         )
     }
 }

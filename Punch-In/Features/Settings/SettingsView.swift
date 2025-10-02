@@ -120,6 +120,20 @@ private extension SettingsView {
                     liquidAction(title: "View Public Profile", icon: "person.text.rectangle", chevron: true)
                 }
                 .buttonStyle(.plain)
+
+                NavigationLink {
+                    EngineerAvailabilityManagementView(
+                        engineer: profile,
+                        firestore: di.firestoreService,
+                        currentUserProvider: { appState.currentUser },
+                        onProfileUpdate: { updated in
+                            appState.currentUser = updated
+                        }
+                    )
+                } label: {
+                    liquidAction(title: "Manage Availability", icon: "calendar", chevron: true)
+                }
+                .buttonStyle(.plain)
             } else if profile.accountType == .artist {
                 NavigationLink {
                     ArtistDetailView(artistId: profile.id, profile: profile)
@@ -163,6 +177,21 @@ private extension SettingsView {
                     OwnerToolsActionCard(
                         title: "Engineer Requests",
                         icon: "person.crop.circle.badge.questionmark",
+                        chevron: true
+                    )
+                }
+                .buttonStyle(.plain)
+
+                NavigationLink {
+                    StudioAvailabilityManagementView(
+                        studio: managedStudio,
+                        firestore: di.firestoreService,
+                        currentUserProvider: { appState.currentUser }
+                    )
+                } label: {
+                    OwnerToolsActionCard(
+                        title: "Availability & Hours",
+                        icon: "calendar",
                         chevron: true
                     )
                 }

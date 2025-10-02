@@ -85,9 +85,11 @@ private struct MainTabView: View {
             }
         case .book:
             NavigationStack(path: $bookPath) {
-                BookingPlaceholderView()
-                    .navigationTitle("Bookings")
-                    .navigationBarTitleDisplayMode(.inline)
+                BookingInboxView(
+                    bookingService: di.bookingService,
+                    firestoreService: di.firestoreService,
+                    currentUserProvider: { appState.currentUser }
+                )
             }
         case .settings:
             NavigationStack(path: $settingsPath) {

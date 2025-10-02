@@ -99,8 +99,7 @@ service cloud.firestore {
 
     function isStudioOwnerById(studioId) {
       let studio = getStudio(studioId);
-      return studio.exists
-          && studio.data != null
+      return studio.data != null
           && studio.data.ownerId is string
           && studio.data.ownerId == request.auth.uid;
     }
@@ -165,6 +164,73 @@ service cloud.firestore {
           && hasField(after, 'updatedAt') && after.updatedAt is timestamp;
     }
 
+    function validBookingStatus(status) {
+      return status in ['pending', 'confirmed', 'completed', 'cancelled', 'rescheduled'];
+    }
+
+    function immutableBookingIds(before, after) {
+      return before.artistId == after.artistId
+          && before.studioId == after.studioId
+          && before.engineerId == after.engineerId;
+    }
+
+    function isBookingParticipantData(data) {
+      return data != null && (
+        data.artistId == request.auth.uid
+        || data.engineerId == request.auth.uid
+        || (data.studioId is string && isStudioOwnerById(data.studioId))
+      );
+    }
+
+    function validApprovalMap(approval) {
+      return approval == null
+        || (
+          approval.requiresStudioApproval is bool
+          && approval.requiresEngineerApproval is bool
+          && (!hasField(approval, 'resolvedBy') || approval.resolvedBy == null || approval.resolvedBy is string)
+          && (!hasField(approval, 'resolvedAt') || approval.resolvedAt == null || approval.resolvedAt is timestamp)
+        );
+    }
+
+    function validBookingCreate(data) {
+      return isSignedIn()
+        && data.artistId is string && data.artistId == request.auth.uid
+        && data.studioId is string
+        && data.roomId is string
+        && data.engineerId is string
+        && validBookingStatus(data.status)
+        && data.requestedStart is timestamp
+        && data.requestedEnd is timestamp
+        && data.durationMinutes is number
+        && data.instantBook is bool
+        && validApprovalMap(data.approval)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function validBookingArtistUpdate(before, after) {
+      return before.artistId == request.auth.uid
+        && immutableBookingIds(before, after)
+        && before.status == 'pending'
+        && after.status == 'pending'
+        && after.instantBook == before.instantBook
+        && validApprovalMap(after.approval)
+        && after.updatedAt is timestamp
+        && after.requestedStart is timestamp
+        && after.requestedEnd is timestamp
+        && after.durationMinutes is number;
+    }
+
+    function validBookingManagerUpdate(before, after) {
+      return immutableBookingIds(before, after)
+        && validBookingStatus(after.status)
+        && validApprovalMap(after.approval)
+        && after.requestedStart == before.requestedStart
+        && after.requestedEnd == before.requestedEnd
+        && after.durationMinutes == before.durationMinutes
+        && after.updatedAt is timestamp;
+    }
+
     match /profiles/{userId} {
       allow read: if request.auth != null;
       allow write: if request.auth != null && request.auth.uid == userId;
@@ -189,6 +255,33 @@ service cloud.firestore {
         allow delete: if isStudioOwnerById(studioId)
             || isEngineerRequestOwner(resource, requestId);
       }
+
+      match /rooms/{roomId} {
+        allow read: if true;
+        allow create, update, delete: if isStudioOwnerById(studioId);
+      }
+    }
+
+    match /studioAvailability/{studioId}/entries/{entryId} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if isStudioOwnerById(studioId);
+    }
+
+    match /engineerAvailability/{engineerId}/entries/{entryId} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if request.auth != null && request.auth.uid == engineerId;
+    }
+
+    match /bookings/{bookingId} {
+      allow list: if isSignedIn();
+      allow read: if resource != null && isBookingParticipantData(resource.data);
+      allow create: if validBookingCreate(request.resource.data);
+      allow update: if resource != null && (
+          (resource.data.artistId == request.auth.uid && validBookingArtistUpdate(resource.data, request.resource.data))
+          || (isStudioOwnerById(resource.data.studioId) && validBookingManagerUpdate(resource.data, request.resource.data))
+          || (resource.data.engineerId == request.auth.uid && validBookingManagerUpdate(resource.data, request.resource.data))
+        );
+      allow delete: if resource != null && resource.data.artistId == request.auth.uid && resource.data.status == 'pending';
     }
 
     match /conversations/{conversationId} {

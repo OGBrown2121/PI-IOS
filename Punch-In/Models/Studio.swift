@@ -12,6 +12,8 @@ struct Studio: Identifiable, Codable, Equatable {
     var coverImageURL: URL?
     var logoImageURL: URL?
     var approvedEngineerIds: [String]
+    var operatingSchedule: StudioOperatingSchedule
+    var autoApproveRequests: Bool
 
     init(
         id: String = UUID().uuidString,
@@ -24,7 +26,9 @@ struct Studio: Identifiable, Codable, Equatable {
         amenities: [String] = [],
         coverImageURL: URL? = nil,
         logoImageURL: URL? = nil,
-        approvedEngineerIds: [String] = []
+        approvedEngineerIds: [String] = [],
+        operatingSchedule: StudioOperatingSchedule = StudioOperatingSchedule(),
+        autoApproveRequests: Bool = false
     ) {
         self.id = id
         self.ownerId = ownerId
@@ -37,6 +41,8 @@ struct Studio: Identifiable, Codable, Equatable {
         self.coverImageURL = coverImageURL
         self.logoImageURL = logoImageURL
         self.approvedEngineerIds = approvedEngineerIds
+        self.operatingSchedule = operatingSchedule
+        self.autoApproveRequests = autoApproveRequests
     }
 }
 
@@ -52,7 +58,14 @@ extension Studio {
             rooms: 3,
             amenities: ["Vocal booth", "Neumann U87", "Lounge"],
             coverImageURL: URL(string: "https://picsum.photos/800/400"),
-            logoImageURL: URL(string: "https://picsum.photos/200")
+            logoImageURL: URL(string: "https://picsum.photos/200"),
+            operatingSchedule: StudioOperatingSchedule(
+                recurringHours: [
+                    RecurringTimeRange(weekday: 1, startTimeMinutes: 9 * 60, durationMinutes: 9 * 60),
+                    RecurringTimeRange(weekday: 3, startTimeMinutes: 9 * 60, durationMinutes: 9 * 60)
+                ]
+            ),
+            autoApproveRequests: false
         )
     }
 
@@ -68,7 +81,13 @@ extension Studio {
             rooms: 4,
             amenities: ["SSL Console", "Parking"],
             coverImageURL: URL(string: "https://picsum.photos/802/400"),
-            logoImageURL: URL(string: "https://picsum.photos/202")
+            logoImageURL: URL(string: "https://picsum.photos/202"),
+            operatingSchedule: StudioOperatingSchedule(
+                recurringHours: [
+                    RecurringTimeRange(weekday: 1, startTimeMinutes: 10 * 60, durationMinutes: 10 * 60),
+                    RecurringTimeRange(weekday: 2, startTimeMinutes: 10 * 60, durationMinutes: 10 * 60)
+                ]
+            )
         ),
         Studio(
             id: UUID().uuidString,
@@ -80,7 +99,12 @@ extension Studio {
             rooms: 2,
             amenities: ["Vintage gear"],
             coverImageURL: URL(string: "https://picsum.photos/804/400"),
-            logoImageURL: URL(string: "https://picsum.photos/204")
+            logoImageURL: URL(string: "https://picsum.photos/204"),
+            operatingSchedule: StudioOperatingSchedule(
+                recurringHours: [
+                    RecurringTimeRange(weekday: 4, startTimeMinutes: 11 * 60, durationMinutes: 8 * 60)
+                ]
+            )
         )
     ]
 }

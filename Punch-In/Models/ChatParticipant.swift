@@ -104,7 +104,9 @@ private extension UserProfile {
             bio: "Producer blending electronic and R&B textures.",
             fieldOne: "Producer",
             fieldTwo: "Ableton, modular synths"
-        )
+        ),
+        contact: UserContactInfo(),
+        engineerSettings: EngineerSettings()
     )
 
     static let mockWriter = UserProfile(
@@ -118,6 +120,8 @@ private extension UserProfile {
             bio: "Songwriter crafting melodic hooks.",
             fieldOne: "Songwriter",
             fieldTwo: "Toplining"
-        )
+        ),
+        contact: UserContactInfo(),
+        engineerSettings: EngineerSettings()
     )
 }

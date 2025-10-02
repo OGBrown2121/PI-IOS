@@ -2,12 +2,19 @@ import SwiftUI
 
 struct EngineerDetailView: View {
     @Environment(\.di) private var di
+    @EnvironmentObject private var appState: AppState
 
     let engineerId: String
 
     @State private var profile: UserProfile?
     @State private var isLoading = false
     @State private var errorMessage: String?
+    @State private var availableStudios: [Studio] = []
+    @State private var isLoadingStudios = false
+    @State private var studiosErrorMessage: String?
+    @State private var isBookingPresented = false
+    @State private var selectedStudio: Studio?
+    @State private var isSelectingStudio = false
 
     init(engineerId: String, profile: UserProfile? = nil) {
         self.engineerId = engineerId
@@ -23,6 +30,16 @@ struct EngineerDetailView: View {
                         expertiseSection(for: profile)
                         detailsSection(for: profile)
                         collaborationSection(for: profile)
+                        if canCurrentUserBook {
+                            PrimaryButton(title: "Book with \(profile.displayName.isEmpty ? profile.username : profile.displayName)") {
+                                handleBookAction()
+                            }
+                        }
+                        if let message = studiosErrorMessage {
+                            Text(message)
+                                .font(.footnote)
+                                .foregroundStyle(.red)
+                        }
                     }
                     .padding(Theme.spacingLarge)
                 }
@@ -43,7 +60,29 @@ struct EngineerDetailView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .task { await loadProfileIfNeeded() }
+        .task {
+            await loadProfileIfNeeded()
+            await loadStudiosIfNeeded()
+        }
+        .sheet(isPresented: $isBookingPresented) {
+            if let studio = selectedStudio, let profile {
+                BookingFlowView(
+                    studio: studio,
+                    preferredEngineerId: profile.id,
+                    bookingService: di.bookingService,
+                    currentUserProvider: { appState.currentUser }
+                )
+            }
+        }
+        .confirmationDialog("Choose a studio", isPresented: $isSelectingStudio, actions: {
+            ForEach(availableStudios) { studio in
+                Button(studio.name) {
+                    selectedStudio = studio
+                    isBookingPresented = true
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        })
     }
 
     private func heroSection(for profile: UserProfile) -> some View {
@@ -128,6 +167,38 @@ struct EngineerDetailView: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.leading)
         }
+    }
+
+    private func handleBookAction() {
+        guard availableStudios.isEmpty == false else {
+            studiosErrorMessage = "This engineer has not connected to any studios yet."
+            return
+        }
+        studiosErrorMessage = nil
+        if availableStudios.count == 1 {
+            selectedStudio = availableStudios.first
+            isBookingPresented = true
+        } else {
+            isSelectingStudio = true
+        }
+    }
+
+    private func loadStudiosIfNeeded() async {
+        guard availableStudios.isEmpty, isLoadingStudios == false else { return }
+        isLoadingStudios = true
+        defer { isLoadingStudios = false }
+        do {
+            let studios = try await di.firestoreService.fetchStudios()
+            availableStudios = studios.filter { $0.approvedEngineerIds.contains(engineerId) }
+            studiosErrorMessage = nil
+        } catch {
+            studiosErrorMessage = error.localizedDescription
+        }
+    }
+
+    private var canCurrentUserBook: Bool {
+        guard let user = appState.currentUser else { return false }
+        return user.accountType == .artist
     }
 
     private func avatar(for profile: UserProfile) -> some View {

@@ -4,6 +4,9 @@ import Foundation
 enum FirestoreServiceError: LocalizedError {
     case engineerAlreadyMember
     case engineerRequestNotFound
+    case bookingConflict
+    case roomNotFound
+    case availabilityNotFound
 
     var errorDescription: String? {
         switch self {
@@ -11,6 +14,12 @@ enum FirestoreServiceError: LocalizedError {
             return "This engineer is already approved to work at this studio."
         case .engineerRequestNotFound:
             return "We couldn't find that request anymore."
+        case .bookingConflict:
+            return "That time is no longer available. Please pick a different slot."
+        case .roomNotFound:
+            return "We couldn't find that room."
+        case .availabilityNotFound:
+            return "We couldn't locate the availability entry."
         }
     }
 }
@@ -34,6 +43,18 @@ protocol FirestoreService {
     ) async throws
     func fetchEngineerRequests(studioId: String) async throws -> [StudioEngineerRequest]
     func fetchUserProfiles(for userIDs: [String]) async throws -> [UserProfile]
+
+    func fetchRooms(for studioId: String) async throws -> [Room]
+    func upsertRoom(_ room: Room) async throws
+    func deleteRoom(roomId: String, studioId: String) async throws
+
+    func fetchAvailability(scope: AvailabilityScope, ownerId: String) async throws -> [AvailabilityEntry]
+    func upsertAvailability(scope: AvailabilityScope, entry: AvailabilityEntry) async throws
+    func deleteAvailability(scope: AvailabilityScope, ownerId: String, entryId: String) async throws
+
+    func fetchBookings(for participantId: String, role: BookingParticipantRole) async throws -> [Booking]
+    func createBooking(_ booking: Booking) async throws
+    func updateBooking(_ booking: Booking) async throws
 }
 
 struct FirebaseFirestoreService: FirestoreService {
@@ -91,6 +112,14 @@ struct FirebaseFirestoreService: FirestoreService {
             data["logoImageURL"] = logoImageURL
         }
 
+        data["autoApproveRequests"] = studio.autoApproveRequests
+
+        if studio.operatingSchedule.recurringHours.isEmpty && studio.operatingSchedule.blackoutDates.isEmpty {
+            data["operatingSchedule"] = FieldValue.delete()
+        } else {
+            data["operatingSchedule"] = encodeOperatingSchedule(studio.operatingSchedule)
+        }
+
         try await database.collection("studios")
             .document(studio.id)
             .setData(data, merge: true)
@@ -116,6 +145,28 @@ struct FirebaseFirestoreService: FirestoreService {
             "fieldOne": profile.profileDetails.fieldOne,
             "fieldTwo": profile.profileDetails.fieldTwo
         ]
+
+        data["contact"] = [
+            "email": profile.contact.email,
+            "phoneNumber": profile.contact.phoneNumber
+        ]
+
+        var engineerSettingsData: [String: Any] = [
+            "isPremium": profile.engineerSettings.isPremium,
+            "instantBookEnabled": profile.engineerSettings.instantBookEnabled,
+            "allowOtherStudios": profile.engineerSettings.allowOtherStudios,
+            "defaultSessionDurationMinutes": profile.engineerSettings.defaultSessionDurationMinutes
+        ]
+
+        if let mainStudioId = profile.engineerSettings.mainStudioId {
+            engineerSettingsData["mainStudioId"] = mainStudioId
+        }
+
+        if let mainStudioSelectedAt = profile.engineerSettings.mainStudioSelectedAt {
+            engineerSettingsData["mainStudioSelectedAt"] = Timestamp(date: mainStudioSelectedAt)
+        }
+
+        data["engineerSettings"] = engineerSettingsData
 
         if let profileImageURL = profile.profileImageURL?.absoluteString {
             data["profileImageURL"] = profileImageURL
@@ -270,6 +321,104 @@ struct FirebaseFirestoreService: FirestoreService {
         }
     }
 
+    func fetchRooms(for studioId: String) async throws -> [Room] {
+        let snapshot = try await database
+            .collection("studios")
+            .document(studioId)
+            .collection("rooms")
+            .order(by: "name")
+            .getDocuments()
+
+        return snapshot.documents.map { decodeRoom(studioId: studioId, documentID: $0.documentID, data: $0.data()) }
+    }
+
+    func upsertRoom(_ room: Room) async throws {
+        let reference = database
+            .collection("studios")
+            .document(room.studioId)
+            .collection("rooms")
+            .document(room.id)
+
+        try await reference.setData(encodeRoom(room), merge: true)
+    }
+
+    func deleteRoom(roomId: String, studioId: String) async throws {
+        let reference = database
+            .collection("studios")
+            .document(studioId)
+            .collection("rooms")
+            .document(roomId)
+        try await reference.delete()
+    }
+
+    func fetchAvailability(scope: AvailabilityScope, ownerId: String) async throws -> [AvailabilityEntry] {
+        let snapshot = try await availabilityCollection(scope: scope, ownerId: ownerId)
+            .order(by: "createdAt", descending: false)
+            .getDocuments()
+
+        return snapshot.documents.map { decodeAvailability(scope: scope, ownerId: ownerId, documentID: $0.documentID, data: $0.data()) }
+    }
+
+    func upsertAvailability(scope: AvailabilityScope, entry: AvailabilityEntry) async throws {
+        let reference = availabilityCollection(scope: scope, ownerId: entry.ownerId)
+            .document(entry.id)
+        try await reference.setData(encodeAvailability(entry), merge: true)
+    }
+
+    func deleteAvailability(scope: AvailabilityScope, ownerId: String, entryId: String) async throws {
+        let reference = availabilityCollection(scope: scope, ownerId: ownerId)
+            .document(entryId)
+        try await reference.delete()
+    }
+
+    func fetchBookings(for participantId: String, role: BookingParticipantRole) async throws -> [Booking] {
+        let collection = database.collection("bookings")
+        let query: Query
+        switch role {
+        case .artist:
+            query = collection.whereField("artistId", isEqualTo: participantId)
+        case .studio:
+            query = collection.whereField("studioId", isEqualTo: participantId)
+        case .engineer:
+            query = collection.whereField("engineerId", isEqualTo: participantId)
+        }
+
+        let snapshot = try await query.order(by: "requestedStart", descending: false).getDocuments()
+        return snapshot.documents.map { decodeBooking(documentID: $0.documentID, data: $0.data()) }
+    }
+
+    func createBooking(_ booking: Booking) async throws {
+        let reference = database.collection("bookings").document(booking.id)
+        let payload = encodeBooking(booking)
+#if DEBUG
+        print("[FirestoreService] createBooking payload:", payload)
+        print("[FirestoreService] createBooking field types:", [
+            "requestedStart": typeDescription(payload["requestedStart"]),
+            "requestedEnd": typeDescription(payload["requestedEnd"]),
+            "createdAt": typeDescription(payload["createdAt"]),
+            "updatedAt": typeDescription(payload["updatedAt"])
+        ])
+#endif
+        try await reference.setData(payload)
+    }
+
+    func updateBooking(_ booking: Booking) async throws {
+        let reference = database.collection("bookings").document(booking.id)
+        let payload = encodeBooking(booking)
+#if DEBUG
+        print("[FirestoreService] updateBooking payload:", payload)
+        print("[FirestoreService] updateBooking field types:", [
+            "requestedStart": typeDescription(payload["requestedStart"]),
+            "requestedEnd": typeDescription(payload["requestedEnd"]),
+            "createdAt": typeDescription(payload["createdAt"]),
+            "updatedAt": typeDescription(payload["updatedAt"]),
+            "confirmedStart": typeDescription(payload["confirmedStart"]),
+            "confirmedEnd": typeDescription(payload["confirmedEnd"])
+        ])
+#endif
+        try await reference.setData(payload, merge: true)
+    }
+
     private func decodeUserProfile(id: String, data: [String: Any]) -> UserProfile {
         let profileData = data["profileDetails"] as? [String: Any] ?? [:]
         let accountTypeRawValue = data["accountType"] as? String ?? AccountType.artist.rawValue
@@ -278,11 +427,27 @@ struct FirebaseFirestoreService: FirestoreService {
         let username = data["username"] as? String ?? ""
         let displayName = data["displayName"] as? String ?? username
         let profileImageURL = (data["profileImageURL"] as? String).flatMap(URL.init(string:))
+        let contactData = data["contact"] as? [String: Any] ?? [:]
+        let engineerSettingsData = data["engineerSettings"] as? [String: Any] ?? [:]
 
         let details = AccountProfileDetails(
             bio: profileData["bio"] as? String ?? "",
             fieldOne: profileData["fieldOne"] as? String ?? "",
             fieldTwo: profileData["fieldTwo"] as? String ?? ""
+        )
+
+        let contact = UserContactInfo(
+            email: contactData["email"] as? String ?? "",
+            phoneNumber: contactData["phoneNumber"] as? String ?? ""
+        )
+
+        let engineerSettings = EngineerSettings(
+            isPremium: engineerSettingsData["isPremium"] as? Bool ?? false,
+            instantBookEnabled: engineerSettingsData["instantBookEnabled"] as? Bool ?? false,
+            mainStudioId: engineerSettingsData["mainStudioId"] as? String,
+            allowOtherStudios: engineerSettingsData["allowOtherStudios"] as? Bool ?? false,
+            mainStudioSelectedAt: (engineerSettingsData["mainStudioSelectedAt"] as? Timestamp)?.dateValue(),
+            defaultSessionDurationMinutes: engineerSettingsData["defaultSessionDurationMinutes"] as? Int ?? 120
         )
 
         return UserProfile(
@@ -292,12 +457,16 @@ struct FirebaseFirestoreService: FirestoreService {
             createdAt: createdAt,
             profileImageURL: profileImageURL,
             accountType: accountType,
-            profileDetails: details
+            profileDetails: details,
+            contact: contact,
+            engineerSettings: engineerSettings
         )
     }
 
     private func decodeStudio(documentID: String, data: [String: Any]) -> Studio {
-        Studio(
+        let schedule = decodeOperatingSchedule(data["operatingSchedule"] as? [String: Any])
+        let autoApproveRequests = data["autoApproveRequests"] as? Bool ?? false
+        return Studio(
             id: documentID,
             ownerId: data["ownerId"] as? String ?? "",
             name: data["name"] as? String ?? "",
@@ -308,7 +477,9 @@ struct FirebaseFirestoreService: FirestoreService {
             amenities: data["amenities"] as? [String] ?? [],
             coverImageURL: (data["coverImageURL"] as? String).flatMap(URL.init(string:)),
             logoImageURL: (data["logoImageURL"] as? String).flatMap(URL.init(string:)),
-            approvedEngineerIds: data["approvedEngineerIds"] as? [String] ?? []
+            approvedEngineerIds: data["approvedEngineerIds"] as? [String] ?? [],
+            operatingSchedule: schedule,
+            autoApproveRequests: autoApproveRequests
         )
     }
 
@@ -346,6 +517,299 @@ struct FirebaseFirestoreService: FirestoreService {
         return result
     }
 
+    private func encodeOperatingSchedule(_ schedule: StudioOperatingSchedule) -> [String: Any] {
+        [
+            "timeZoneIdentifier": schedule.timeZoneIdentifier,
+            "recurringHours": schedule.recurringHours.map { range in
+                [
+                    "id": range.id,
+                    "weekday": range.weekday,
+                    "startTimeMinutes": range.startTimeMinutes,
+                    "durationMinutes": range.durationMinutes
+                ]
+            },
+            "blackoutDates": schedule.blackoutDates.map { Timestamp(date: $0) }
+        ]
+    }
+
+    private func decodeOperatingSchedule(_ payload: [String: Any]?) -> StudioOperatingSchedule {
+        guard let payload else { return StudioOperatingSchedule() }
+        let timeZoneIdentifier = payload["timeZoneIdentifier"] as? String ?? TimeZone.current.identifier
+        let recurringHoursPayload = payload["recurringHours"] as? [[String: Any]] ?? []
+        let blackoutPayload = payload["blackoutDates"] as? [Any] ?? []
+
+        let recurringHours = recurringHoursPayload.compactMap { item -> RecurringTimeRange? in
+            guard
+                let weekday = item["weekday"] as? Int,
+                let startTimeMinutes = item["startTimeMinutes"] as? Int,
+                let durationMinutes = item["durationMinutes"] as? Int
+            else { return nil }
+            let identifier = item["id"] as? String ?? UUID().uuidString
+            return RecurringTimeRange(
+                id: identifier,
+                weekday: weekday,
+                startTimeMinutes: startTimeMinutes,
+                durationMinutes: durationMinutes
+            )
+        }
+
+        let blackoutDates = blackoutPayload.compactMap { value -> Date? in
+            if let timestamp = value as? Timestamp {
+                return timestamp.dateValue()
+            }
+            if let date = value as? Date {
+                return date
+            }
+            return nil
+        }
+
+        return StudioOperatingSchedule(
+            timeZoneIdentifier: timeZoneIdentifier,
+            recurringHours: recurringHours,
+            blackoutDates: blackoutDates
+        )
+    }
+
+    private func availabilityCollection(scope: AvailabilityScope, ownerId: String) -> CollectionReference {
+        switch scope {
+        case .studio:
+            return database.collection("studioAvailability").document(ownerId).collection("entries")
+        case .engineer:
+            return database.collection("engineerAvailability").document(ownerId).collection("entries")
+        }
+    }
+
+    private func encodeRoom(_ room: Room) -> [String: Any] {
+        var data: [String: Any] = [
+            "name": room.name,
+            "description": room.description,
+            "amenities": room.amenities,
+            "isDefault": room.isDefault
+        ]
+
+        if let hourlyRate = room.hourlyRate {
+            data["hourlyRate"] = hourlyRate
+        }
+
+        if let capacity = room.capacity {
+            data["capacity"] = capacity
+        }
+
+        return data
+    }
+
+    private func decodeRoom(studioId: String, documentID: String, data: [String: Any]) -> Room {
+        Room(
+            id: documentID,
+            studioId: studioId,
+            name: data["name"] as? String ?? "Room",
+            description: data["description"] as? String ?? "",
+            hourlyRate: data["hourlyRate"] as? Double,
+            capacity: data["capacity"] as? Int,
+            amenities: data["amenities"] as? [String] ?? [],
+            isDefault: data["isDefault"] as? Bool ?? false
+        )
+    }
+
+    private func encodeAvailability(_ entry: AvailabilityEntry) -> [String: Any] {
+        var data: [String: Any] = [
+            "kind": entry.kind.rawValue,
+            "ownerId": entry.ownerId,
+            "durationMinutes": entry.durationMinutes,
+            "createdBy": entry.createdBy,
+            "createdAt": Timestamp(date: entry.createdAt),
+            "updatedAt": Timestamp(date: entry.updatedAt)
+        ]
+
+        if let studioId = entry.studioId {
+            data["studioId"] = studioId
+        }
+
+        if let roomId = entry.roomId {
+            data["roomId"] = roomId
+        }
+
+        if let engineerId = entry.engineerId {
+            data["engineerId"] = engineerId
+        }
+
+        if let weekday = entry.weekday {
+            data["weekday"] = weekday
+        }
+
+        if let startTimeMinutes = entry.startTimeMinutes {
+            data["startTimeMinutes"] = startTimeMinutes
+        }
+
+        if let startDate = entry.startDate {
+            data["startDate"] = Timestamp(date: startDate)
+        }
+
+        if let endDate = entry.endDate {
+            data["endDate"] = Timestamp(date: endDate)
+        }
+
+        if let sourceBookingId = entry.sourceBookingId {
+            data["sourceBookingId"] = sourceBookingId
+        }
+
+        if let notes = entry.notes {
+            data["notes"] = notes
+        }
+
+        return data
+    }
+
+    private func decodeAvailability(
+        scope: AvailabilityScope,
+        ownerId: String,
+        documentID: String,
+        data: [String: Any]
+    ) -> AvailabilityEntry {
+        let kindRaw = data["kind"] as? String ?? AvailabilityKind.recurring.rawValue
+        let startDate = (data["startDate"] as? Timestamp)?.dateValue()
+        let endDate = (data["endDate"] as? Timestamp)?.dateValue()
+        let createdAt = (data["createdAt"] as? Timestamp)?.dateValue() ?? Date()
+        let updatedAt = (data["updatedAt"] as? Timestamp)?.dateValue() ?? createdAt
+
+        return AvailabilityEntry(
+            id: documentID,
+            kind: AvailabilityKind(rawValue: kindRaw) ?? .recurring,
+            ownerId: ownerId,
+            studioId: data["studioId"] as? String,
+            roomId: data["roomId"] as? String,
+            engineerId: data["engineerId"] as? String,
+            weekday: intValue(data["weekday"]),
+            startTimeMinutes: intValue(data["startTimeMinutes"]),
+            durationMinutes: intValue(data["durationMinutes"]) ?? 60,
+            startDate: startDate,
+            endDate: endDate,
+            sourceBookingId: data["sourceBookingId"] as? String,
+            createdBy: data["createdBy"] as? String ?? ownerId,
+            notes: data["notes"] as? String,
+            createdAt: createdAt,
+            updatedAt: updatedAt
+        )
+    }
+
+    private func encodeBooking(_ booking: Booking) -> [String: Any] {
+        var approval: [String: Any] = [
+            "requiresStudioApproval": booking.approval.requiresStudioApproval,
+            "requiresEngineerApproval": booking.approval.requiresEngineerApproval
+        ]
+
+        if let resolvedBy = booking.approval.resolvedBy {
+            approval["resolvedBy"] = resolvedBy
+        }
+
+        if let resolvedAt = booking.approval.resolvedAt {
+            approval["resolvedAt"] = Timestamp(date: resolvedAt)
+        }
+
+        var data: [String: Any] = [
+            "artistId": booking.artistId,
+            "studioId": booking.studioId,
+            "roomId": booking.roomId,
+            "engineerId": booking.engineerId,
+            "status": booking.status.rawValue,
+            "requestedStart": Timestamp(date: booking.requestedStart),
+            "requestedEnd": Timestamp(date: booking.requestedEnd),
+            "durationMinutes": booking.durationMinutes,
+            "instantBook": booking.instantBook,
+            "approval": approval,
+            "notes": booking.notes,
+            "createdAt": Timestamp(date: booking.createdAt),
+            "updatedAt": Timestamp(date: booking.updatedAt)
+        ]
+
+        if let confirmedStart = booking.confirmedStart {
+            data["confirmedStart"] = Timestamp(date: confirmedStart)
+        }
+
+        if let confirmedEnd = booking.confirmedEnd {
+            data["confirmedEnd"] = Timestamp(date: confirmedEnd)
+        }
+
+        if let pricing = booking.pricing {
+            data["pricing"] = [
+                "hourlyRate": pricing.hourlyRate,
+                "total": pricing.total,
+                "currency": pricing.currency
+            ]
+        }
+
+        if let conversationId = booking.conversationId {
+            data["conversationId"] = conversationId
+        }
+
+        return data
+    }
+
+    private func decodeBooking(documentID: String, data: [String: Any]) -> Booking {
+        let statusRaw = data["status"] as? String ?? BookingStatus.pending.rawValue
+        let approvalData = data["approval"] as? [String: Any] ?? [:]
+        let pricingData = data["pricing"] as? [String: Any]
+
+        let approval = BookingApprovalState(
+            requiresStudioApproval: approvalData["requiresStudioApproval"] as? Bool ?? true,
+            requiresEngineerApproval: approvalData["requiresEngineerApproval"] as? Bool ?? true,
+            resolvedBy: approvalData["resolvedBy"] as? String,
+            resolvedAt: (approvalData["resolvedAt"] as? Timestamp)?.dateValue()
+        )
+
+        let pricing: BookingPricing?
+        if let pricingData {
+            pricing = BookingPricing(
+                hourlyRate: pricingData["hourlyRate"] as? Double ?? 0,
+                total: pricingData["total"] as? Double ?? 0,
+                currency: pricingData["currency"] as? String ?? "USD"
+            )
+        } else {
+            pricing = nil
+        }
+
+        return Booking(
+            id: documentID,
+            artistId: data["artistId"] as? String ?? "",
+            studioId: data["studioId"] as? String ?? "",
+            roomId: data["roomId"] as? String ?? "",
+            engineerId: data["engineerId"] as? String ?? "",
+            status: BookingStatus(rawValue: statusRaw) ?? .pending,
+            requestedStart: (data["requestedStart"] as? Timestamp)?.dateValue() ?? Date(),
+            requestedEnd: (data["requestedEnd"] as? Timestamp)?.dateValue() ?? Date(),
+            confirmedStart: (data["confirmedStart"] as? Timestamp)?.dateValue(),
+            confirmedEnd: (data["confirmedEnd"] as? Timestamp)?.dateValue(),
+            durationMinutes: intValue(data["durationMinutes"]) ?? 60,
+            pricing: pricing,
+            instantBook: data["instantBook"] as? Bool ?? false,
+            approval: approval,
+            conversationId: data["conversationId"] as? String,
+            notes: data["notes"] as? String ?? "",
+            createdAt: (data["createdAt"] as? Timestamp)?.dateValue() ?? Date(),
+            updatedAt: (data["updatedAt"] as? Timestamp)?.dateValue() ?? Date()
+        )
+    }
+
+    private func intValue(_ raw: Any?) -> Int? {
+        if let intValue = raw as? Int {
+            return intValue
+        }
+        if let doubleValue = raw as? Double {
+            return Int(doubleValue)
+        }
+        if let stringValue = raw as? String, let intFromString = Int(stringValue) {
+            return intFromString
+        }
+        return nil
+    }
+
+#if DEBUG
+    private func typeDescription(_ value: Any?) -> String {
+        guard let value else { return "nil" }
+        return String(describing: Swift.type(of: value))
+    }
+#endif
+
     private func makeNSError(_ error: Error) -> NSError {
         if let nsError = error as NSError? {
             return nsError
@@ -363,6 +827,10 @@ final class MockFirestoreService: FirestoreService {
     private var storedStudios: [Studio] = Studio.mockList
     private var studioStreams: [UUID: AsyncThrowingStream<[Studio], Error>.Continuation] = [:]
     private var studioEngineerRequests: [String: [StudioEngineerRequest]] = [:]
+    private var studioRooms: [String: [Room]] = [:]
+    private var studioAvailabilityStore: [String: [AvailabilityEntry]] = [:]
+    private var engineerAvailabilityStore: [String: [AvailabilityEntry]] = [:]
+    private var bookingsStore: [String: Booking] = [:]
 
     func fetchStudios() async throws -> [Studio] {
         storedStudios
@@ -478,6 +946,130 @@ final class MockFirestoreService: FirestoreService {
 
     func fetchUserProfiles(for userIDs: [String]) async throws -> [UserProfile] {
         userIDs.compactMap { storedProfiles[$0] }
+    }
+
+    func fetchRooms(for studioId: String) async throws -> [Room] {
+        if studioRooms[studioId] == nil {
+            studioRooms[studioId] = [Room(studioId: studioId, name: "Main Room", isDefault: true)]
+        }
+        return studioRooms[studioId]?.sorted(by: { $0.name < $1.name }) ?? []
+    }
+
+    func upsertRoom(_ room: Room) async throws {
+        var rooms = studioRooms[room.studioId] ?? []
+        if let index = rooms.firstIndex(where: { $0.id == room.id }) {
+            rooms[index] = room
+        } else {
+            rooms.append(room)
+        }
+        studioRooms[room.studioId] = rooms
+    }
+
+    func deleteRoom(roomId: String, studioId: String) async throws {
+        var rooms = studioRooms[studioId] ?? []
+        rooms.removeAll { $0.id == roomId }
+        studioRooms[studioId] = rooms
+    }
+
+    func fetchAvailability(scope: AvailabilityScope, ownerId: String) async throws -> [AvailabilityEntry] {
+        switch scope {
+        case .studio:
+            return (studioAvailabilityStore[ownerId] ?? []).sorted { $0.createdAt < $1.createdAt }
+        case .engineer:
+            return (engineerAvailabilityStore[ownerId] ?? []).sorted { $0.createdAt < $1.createdAt }
+        }
+    }
+
+    func upsertAvailability(scope: AvailabilityScope, entry: AvailabilityEntry) async throws {
+        switch scope {
+        case .studio:
+            var entries = studioAvailabilityStore[entry.ownerId] ?? []
+            if let index = entries.firstIndex(where: { $0.id == entry.id }) {
+                entries[index] = entry
+            } else {
+                entries.append(entry)
+            }
+            studioAvailabilityStore[entry.ownerId] = entries
+        case .engineer:
+            var entries = engineerAvailabilityStore[entry.ownerId] ?? []
+            if let index = entries.firstIndex(where: { $0.id == entry.id }) {
+                entries[index] = entry
+            } else {
+                entries.append(entry)
+            }
+            engineerAvailabilityStore[entry.ownerId] = entries
+        }
+    }
+
+    func deleteAvailability(scope: AvailabilityScope, ownerId: String, entryId: String) async throws {
+        switch scope {
+        case .studio:
+            var entries = studioAvailabilityStore[ownerId] ?? []
+            entries.removeAll { $0.id == entryId }
+            studioAvailabilityStore[ownerId] = entries
+        case .engineer:
+            var entries = engineerAvailabilityStore[ownerId] ?? []
+            entries.removeAll { $0.id == entryId }
+            engineerAvailabilityStore[ownerId] = entries
+        }
+    }
+
+    func fetchBookings(for participantId: String, role: BookingParticipantRole) async throws -> [Booking] {
+        let bookings = bookingsStore.values.filter { booking in
+            switch role {
+            case .artist:
+                return booking.artistId == participantId
+            case .studio:
+                return booking.studioId == participantId
+            case .engineer:
+                return booking.engineerId == participantId
+            }
+        }
+
+        return bookings.sorted { $0.requestedStart < $1.requestedStart }
+    }
+
+    func createBooking(_ booking: Booking) async throws {
+        if hasConflict(for: booking) {
+            throw FirestoreServiceError.bookingConflict
+        }
+        bookingsStore[booking.id] = booking
+    }
+
+    func updateBooking(_ booking: Booking) async throws {
+        if hasConflict(for: booking) {
+            throw FirestoreServiceError.bookingConflict
+        }
+        bookingsStore[booking.id] = booking
+    }
+
+    private func hasConflict(for booking: Booking) -> Bool {
+        let relevantStatuses: Set<BookingStatus> = [.pending, .confirmed, .rescheduled]
+        guard relevantStatuses.contains(booking.status) else { return false }
+
+        let targetInterval = bookingInterval(booking)
+
+        for existing in bookingsStore.values where existing.id != booking.id {
+            guard relevantStatuses.contains(existing.status) else { continue }
+            guard existing.studioId == booking.studioId else { continue }
+
+            let sameRoom = existing.roomId == booking.roomId
+            let sameEngineer = existing.engineerId == booking.engineerId
+
+            guard sameRoom || sameEngineer else { continue }
+
+            if bookingInterval(existing).overlaps(targetInterval) {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private func bookingInterval(_ booking: Booking) -> ClosedRange<Date> {
+        let start = booking.confirmedStart ?? booking.requestedStart
+        let end = booking.confirmedEnd ?? booking.requestedEnd
+        return start...end
     }
 
     private func notifyStudioStreams() {

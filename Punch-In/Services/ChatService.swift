@@ -525,7 +525,9 @@ final class FirestoreChatService: ChatService {
                 createdAt: createdAt,
                 profileImageURL: imageURL,
                 accountType: accountType,
-                profileDetails: details
+                profileDetails: details,
+                contact: UserContactInfo(),
+                engineerSettings: EngineerSettings()
             )
             return ChatParticipant(user: profile)
         case .studio:
@@ -697,7 +699,9 @@ final class FirestoreChatService: ChatService {
             createdAt: createdAt,
             profileImageURL: imageURL,
             accountType: accountType,
-            profileDetails: details
+            profileDetails: details,
+            contact: UserContactInfo(),
+            engineerSettings: EngineerSettings()
         )
     }
 
