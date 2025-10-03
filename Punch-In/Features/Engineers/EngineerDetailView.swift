@@ -70,6 +70,7 @@ struct EngineerDetailView: View {
                     studio: studio,
                     preferredEngineerId: profile.id,
                     bookingService: di.bookingService,
+                    firestoreService: di.firestoreService,
                     currentUserProvider: { appState.currentUser }
                 )
             }

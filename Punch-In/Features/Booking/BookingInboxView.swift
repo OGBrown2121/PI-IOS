@@ -77,10 +77,14 @@ private struct InboxContent: View {
     let subtitle: String
     let allowPendingActions: Bool
 
+    @State private var bookingToReschedule: Booking?
+    @State private var bookingToCancel: Booking?
+    @State private var showCancelDialog = false
+
     var body: some View {
         VStack(spacing: 12) {
             Picker("Display Mode", selection: $viewModel.displayMode) {
-                ForEach(BookingInboxViewModel.DisplayMode.allCases) { mode in
+                ForEach(viewModel.availableDisplayModes) { mode in
                     Text(mode.title).tag(mode)
                 }
             }
@@ -94,13 +98,67 @@ private struct InboxContent: View {
                     scheduled: scheduled,
                     title: title,
                     subtitle: subtitle,
-                    allowPendingActions: allowPendingActions
+                    allowPendingActions: allowPendingActions,
+                    onReschedule: { bookingToReschedule = $0 },
+                    onCancel: { booking in
+                        bookingToCancel = booking
+                        showCancelDialog = true
+                    }
                 )
+            } else if viewModel.displayMode == .schedule {
+                EngineerScheduleView()
             } else {
-                BookingCalendarView(allowPendingActions: allowPendingActions)
+                BookingCalendarView(
+                    allowPendingActions: allowPendingActions,
+                    onReschedule: { bookingToReschedule = $0 },
+                    onCancel: { booking in
+                        bookingToCancel = booking
+                        showCancelDialog = true
+                    }
+                )
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .sheet(item: $bookingToReschedule) { booking in
+            RescheduleBookingSheet(
+                booking: booking,
+                durationOptions: viewModel.durationOptions(including: booking.durationMinutes)
+            ) { start, duration in
+                Task {
+                    await viewModel.reschedule(booking, to: start, durationMinutes: duration)
+                }
+            }
+        }
+        .confirmationDialog(
+            "Cancel session?",
+            isPresented: $showCancelDialog,
+            titleVisibility: .visible,
+            presenting: bookingToCancel
+        ) { booking in
+            Button("Cancel session", role: .destructive) {
+                Task {
+                    await viewModel.cancel(booking)
+                }
+                bookingToCancel = nil
+            }
+            Button("Keep session", role: .cancel) {
+                bookingToCancel = nil
+            }
+        } message: { _ in
+            Text("This will notify everyone that the session is cancelled.")
+        }
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Menu {
+                    Toggle(isOn: $viewModel.hideCancelled) {
+                        Label("Hide cancelled sessions", systemImage: viewModel.hideCancelled ? "eye.slash" : "eye")
+                    }
+                } label: {
+                    Image(systemName: "line.3.horizontal.decrease.circle")
+                        .imageScale(.large)
+                }
+            }
+        }
     }
 }
 
@@ -112,6 +170,8 @@ private struct BookingListView: View {
     let title: String
     let subtitle: String
     let allowPendingActions: Bool
+    let onReschedule: (Booking) -> Void
+    let onCancel: (Booking) -> Void
 
     var body: some View {
         List {
@@ -128,7 +188,9 @@ private struct BookingListView: View {
                     ForEach(pending) { booking in
                         BookingRow(
                             booking: booking,
-                            showActions: allowPendingActions && viewModel.canAct(on: booking)
+                            showActions: allowPendingActions && viewModel.canAct(on: booking),
+                            onReschedule: onReschedule,
+                            onCancel: onCancel
                         )
                     }
                 }
@@ -137,7 +199,12 @@ private struct BookingListView: View {
             if !scheduled.isEmpty {
                 Section(subtitle) {
                     ForEach(scheduled) { booking in
-                        BookingRow(booking: booking, showActions: false)
+                        BookingRow(
+                            booking: booking,
+                            showActions: false,
+                            onReschedule: onReschedule,
+                            onCancel: onCancel
+                        )
                     }
                 }
             }
@@ -162,6 +229,8 @@ private struct BookingCalendarView: View {
     @EnvironmentObject private var viewModel: BookingInboxViewModel
 
     let allowPendingActions: Bool
+    let onReschedule: (Booking) -> Void
+    let onCancel: (Booking) -> Void
 
     var body: some View {
         ScrollView {
@@ -209,7 +278,9 @@ private struct BookingCalendarView: View {
                                 ForEach(bookings) { booking in
                                     BookingRow(
                                         booking: booking,
-                                        showActions: allowPendingActions && viewModel.canAct(on: booking)
+                                        showActions: allowPendingActions && viewModel.canAct(on: booking),
+                                        onReschedule: onReschedule,
+                                        onCancel: onCancel
                                     )
                                     .background(
                                         RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -278,11 +349,160 @@ private struct BookingCalendarView: View {
     }()
 }
 
+private struct EngineerScheduleView: View {
+    @EnvironmentObject private var viewModel: BookingInboxViewModel
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 16) {
+                header
+                ForEach(viewModel.engineerSchedulesForSelectedDate) { schedule in
+                    EngineerScheduleRow(schedule: schedule, labelProvider: viewModel)
+                        .padding(.horizontal, 16)
+                }
+
+                if viewModel.engineerSchedulesForSelectedDate.isEmpty {
+                    ContentUnavailableView(
+                        "No engineers",
+                        systemImage: "person.crop.rectangle.badge.questionmark",
+                        description: Text("Invite engineers to your studio to see their schedules here.")
+                    )
+                    .frame(maxWidth: .infinity, minHeight: 220)
+                }
+            }
+            .padding(.bottom, 24)
+        }
+        .refreshable {
+            await viewModel.refresh()
+        }
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Engineer schedule")
+                .font(.headline)
+            Text("Showing sessions for \(formattedDate(viewModel.selectedCalendarDate))")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal)
+    }
+
+    private func formattedDate(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .full
+        formatter.timeStyle = .none
+        return formatter.string(from: date)
+    }
+}
+
+private struct EngineerScheduleRow: View {
+    let schedule: BookingInboxViewModel.EngineerSchedule
+    let labelProvider: BookingInboxViewModel
+
+    private let formatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return formatter
+    }()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                avatar
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(labelProvider.displayName(forUser: schedule.engineerId))
+                        .font(.subheadline.weight(.semibold))
+                    if let profile = schedule.profile, profile.profileDetails.fieldOne.isEmpty == false {
+                        Text(profile.profileDetails.fieldOne)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            if schedule.bookings.isEmpty {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(Color(uiColor: .tertiarySystemGroupedBackground))
+                    Text("No sessions today")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 12)
+                }
+                .frame(height: 48)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 12) {
+                        ForEach(schedule.bookings) { booking in
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(labelProvider.roomName(for: booking.roomId))
+                                    .font(.caption.weight(.semibold))
+                                Text(rangeLabel(for: booking))
+                                    .font(.footnote)
+                            }
+                            .padding(.vertical, 10)
+                            .padding(.horizontal, 12)
+                            .background(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .fill(Color.accentColor.opacity(0.18))
+                            )
+                            .foregroundStyle(Color.primary)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(.vertical, 16)
+        .padding(.horizontal, 16)
+        .background(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(Color(uiColor: .secondarySystemGroupedBackground))
+        )
+    }
+
+    @ViewBuilder
+    private var avatar: some View {
+        if let url = schedule.profile?.profileImageURL {
+            AsyncImage(url: url) { phase in
+                switch phase {
+                case .empty:
+                    ProgressView()
+                case .success(let image):
+                    image.resizable().scaledToFill()
+                case .failure:
+                    Image(systemName: "person.crop.circle")
+                        .font(.title2)
+                        .foregroundStyle(.secondary)
+                @unknown default:
+                    EmptyView()
+                }
+            }
+            .frame(width: 36, height: 36)
+            .clipShape(Circle())
+        } else {
+            Image(systemName: "person.crop.circle")
+                .font(.title2)
+                .foregroundStyle(.secondary)
+                .frame(width: 36, height: 36)
+        }
+    }
+
+    private func rangeLabel(for booking: Booking) -> String {
+        let start = booking.requestedStart
+        let end = booking.requestedEnd
+        return "\(formatter.string(from: start)) – \(formatter.string(from: end))"
+    }
+}
+
 private struct BookingRow: View {
     @EnvironmentObject private var viewModel: BookingInboxViewModel
 
     let booking: Booking
     let showActions: Bool
+    let onReschedule: (Booking) -> Void
+    let onCancel: (Booking) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -296,7 +516,7 @@ private struct BookingRow: View {
     }
 
     private var header: some View {
-        HStack {
+        HStack(alignment: .center, spacing: 8) {
             Text(dateRange)
                 .font(.headline)
             Spacer()
@@ -307,6 +527,25 @@ private struct BookingRow: View {
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
                 .background(badge.color.opacity(0.14), in: Capsule())
+
+            if viewModel.canCancel(booking) || viewModel.canReschedule(booking) {
+                Menu {
+                    if viewModel.canReschedule(booking) {
+                        Button("Reschedule") {
+                            onReschedule(booking)
+                        }
+                    }
+                    if viewModel.canCancel(booking) {
+                        Button("Cancel session", role: .destructive) {
+                            onCancel(booking)
+                        }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
     }
 
@@ -411,6 +650,83 @@ private struct BookingRow: View {
         formatter.timeStyle = .short
         return formatter
     }()
+}
+
+private struct RescheduleBookingSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let booking: Booking
+    let durationOptions: [Int]
+    let onSubmit: (Date, Int) -> Void
+
+    @State private var startDate: Date
+    @State private var durationMinutes: Int
+
+    init(booking: Booking, durationOptions: [Int], onSubmit: @escaping (Date, Int) -> Void) {
+        self.booking = booking
+        self.durationOptions = durationOptions.sorted()
+        self.onSubmit = onSubmit
+        _startDate = State(initialValue: booking.requestedStart)
+        _durationMinutes = State(initialValue: booking.durationMinutes)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Start time") {
+                    DatePicker(
+                        "Date",
+                        selection: $startDate,
+                        displayedComponents: [.date, .hourAndMinute]
+                    )
+                }
+
+                Section("Duration") {
+                    Picker("Duration", selection: $durationMinutes) {
+                        ForEach(durationOptions, id: \.self) { minutes in
+                            Text(label(for: minutes)).tag(minutes)
+                        }
+                    }
+                }
+
+                Section("Summary") {
+                    Text(summaryLabel)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("Reschedule")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        onSubmit(startDate, durationMinutes)
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+
+    private func label(for minutes: Int) -> String {
+        if minutes % 60 == 0 {
+            return "\(minutes / 60)h"
+        }
+        return "\(minutes) min"
+    }
+
+    private var summaryLabel: String {
+        let endDate = startDate.addingTimeInterval(TimeInterval(durationMinutes * 60))
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        let startString = formatter.string(from: startDate)
+        let endString = formatter.string(from: endDate)
+        return "Session will run from \(startString) to \(endString)."
+    }
 }
 
 // Preview intentionally omitted – relies on Firestore data.

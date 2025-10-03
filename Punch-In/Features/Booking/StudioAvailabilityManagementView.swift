@@ -208,12 +208,16 @@ struct StudioAvailabilityManagementView: View {
     }
 
     private var studioHeaderSection: some View {
-        Section("Settings") {
-            Toggle("Enable instant booking", isOn: Binding(
-                get: { viewModel.studio.autoApproveRequests },
-                set: { _ in Task { await viewModel.toggleAutoApprove() } }
+        Section("Session Approvals") {
+            Toggle("Studio must approve sessions", isOn: Binding(
+                get: { !viewModel.studio.autoApproveRequests },
+                set: { newValue in Task { await viewModel.setStudioRequiresApproval(newValue) } }
             ))
             .toggleStyle(.switch)
+
+            Text("When off, new bookings from approved artists are auto-confirmed unless the engineer still needs to approve.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
 
             if viewModel.isPersisting {
                 ProgressView()

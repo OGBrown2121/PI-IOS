@@ -153,10 +153,6 @@ struct DefaultBookingService: BookingService {
 
         try await firestore.createBooking(booking)
 
-        if quote.isInstant {
-            try await createBookingHolds(request: request, booking: booking, endDate: quote.endDate)
-        }
-
         return booking
     }
 
@@ -166,9 +162,6 @@ struct DefaultBookingService: BookingService {
 
     func updateBooking(_ booking: Booking) async throws {
         try await firestore.updateBooking(booking)
-        if booking.status == .confirmed {
-            try await ensureHoldsExist(for: booking)
-        }
     }
 }
 
@@ -312,9 +305,8 @@ private extension DefaultBookingService {
         let engineerSettings = engineer.engineerSettings
         let calendar = Calendar(identifier: .gregorian)
         let mainStudioMatches: Bool
-        if let mainStudio = engineerSettings.mainStudioId,
-           let selectedAt = engineerSettings.mainStudioSelectedAt {
-            mainStudioMatches = mainStudio == studio.id && calendar.isDate(selectedAt, inSameDayAs: startDate)
+        if let mainStudio = engineerSettings.mainStudioId {
+            mainStudioMatches = mainStudio == studio.id
         } else {
             mainStudioMatches = false
         }
@@ -326,83 +318,6 @@ private extension DefaultBookingService {
             requiresStudioApproval: canInstantBook == false,
             requiresEngineerApproval: engineerSettings.canInstantBook == false || engineerAllowsStudio == false
         )
-    }
-
-    func createBookingHolds(request: BookingRequestInput, booking: Booking, endDate: Date) async throws {
-        let studioEntry = AvailabilityEntry(
-            kind: .bookingHold,
-            ownerId: request.studio.id,
-            studioId: request.studio.id,
-            roomId: request.room.id,
-            engineerId: request.engineer.id,
-            durationMinutes: request.durationMinutes,
-            startDate: booking.requestedStart,
-            endDate: endDate,
-            sourceBookingId: booking.id,
-            createdBy: request.artist.id,
-            notes: "Reserved for booking \(booking.id)"
-        )
-
-        let engineerEntry = AvailabilityEntry(
-            kind: .bookingHold,
-            ownerId: request.engineer.id,
-            studioId: request.studio.id,
-            roomId: request.room.id,
-            engineerId: request.engineer.id,
-            durationMinutes: request.durationMinutes,
-            startDate: booking.requestedStart,
-            endDate: endDate,
-            sourceBookingId: booking.id,
-            createdBy: request.artist.id,
-            notes: "Reserved for booking \(booking.id)"
-        )
-
-        async let studioHold: Void = firestore.upsertAvailability(scope: .studio, entry: studioEntry)
-        async let engineerHold: Void = firestore.upsertAvailability(scope: .engineer, entry: engineerEntry)
-        _ = try await (studioHold, engineerHold)
-    }
-
-    func ensureHoldsExist(for booking: Booking) async throws {
-        let start = booking.confirmedStart ?? booking.requestedStart
-        let end = booking.confirmedEnd ?? booking.requestedEnd
-
-        let studioEntries = try await firestore.fetchAvailability(scope: .studio, ownerId: booking.studioId)
-        let hasStudioHold = studioEntries.contains { $0.sourceBookingId == booking.id }
-        if hasStudioHold == false {
-            let studio = AvailabilityEntry(
-                kind: .bookingHold,
-                ownerId: booking.studioId,
-                studioId: booking.studioId,
-                roomId: booking.roomId,
-                engineerId: booking.engineerId,
-                durationMinutes: booking.durationMinutes,
-                startDate: start,
-                endDate: end,
-                sourceBookingId: booking.id,
-                createdBy: booking.artistId,
-                notes: "Reserved post-confirmation"
-            )
-            try await firestore.upsertAvailability(scope: .studio, entry: studio)
-        }
-
-        let engineerEntries = try await firestore.fetchAvailability(scope: .engineer, ownerId: booking.engineerId)
-        let hasEngineerHold = engineerEntries.contains { $0.sourceBookingId == booking.id }
-        if hasEngineerHold == false {
-            let engineer = AvailabilityEntry(
-                kind: .bookingHold,
-                ownerId: booking.engineerId,
-                studioId: booking.studioId,
-                roomId: booking.roomId,
-                engineerId: booking.engineerId,
-                durationMinutes: booking.durationMinutes,
-                startDate: start,
-                endDate: end,
-                sourceBookingId: booking.id,
-                createdBy: booking.artistId,
-                notes: "Reserved post-confirmation"
-            )
-            try await firestore.upsertAvailability(scope: .engineer, entry: engineer)
-        }
     }
 
     func minutesFromMidnight(for date: Date, calendar: Calendar) -> Int {

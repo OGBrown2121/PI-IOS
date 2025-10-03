@@ -221,14 +221,80 @@ service cloud.firestore {
         && after.durationMinutes is number;
     }
 
+    function timeUnchanged(before, after) {
+      return after.requestedStart == before.requestedStart
+          && after.requestedEnd == before.requestedEnd
+          && after.durationMinutes == before.durationMinutes;
+    }
+
+    function approvalsCleared(approval) {
+      return approval.requiresEngineerApproval == false
+          && approval.requiresStudioApproval == false;
+    }
+
+    function validBookingArtistCancel(before, after) {
+      return before.artistId == request.auth.uid
+        && immutableBookingIds(before, after)
+        && before.status in ['pending', 'confirmed', 'rescheduled']
+        && after.status == 'cancelled'
+        && timeUnchanged(before, after)
+        && approvalsCleared(after.approval)
+        && after.confirmedStart == null
+        && after.confirmedEnd == null
+        && after.updatedAt is timestamp;
+    }
+
+    function validBookingArtistReschedule(before, after) {
+      return before.artistId == request.auth.uid
+        && immutableBookingIds(before, after)
+        && before.status in ['pending', 'confirmed', 'rescheduled']
+        && after.status == 'pending'
+        && after.requestedStart is timestamp
+        && after.requestedEnd is timestamp
+        && after.durationMinutes is number
+        && (after.requestedStart != before.requestedStart
+            || after.requestedEnd != before.requestedEnd
+            || after.durationMinutes != before.durationMinutes)
+        && after.confirmedStart == null
+        && after.confirmedEnd == null
+        && after.approval.requiresEngineerApproval == true
+        && after.approval.requiresStudioApproval == before.approval.requiresStudioApproval
+        && (!hasField(after.approval, 'resolvedBy') || after.approval.resolvedBy == null)
+        && (!hasField(after.approval, 'resolvedAt') || after.approval.resolvedAt == null)
+        && after.updatedAt is timestamp;
+    }
+
     function validBookingManagerUpdate(before, after) {
       return immutableBookingIds(before, after)
         && validBookingStatus(after.status)
         && validApprovalMap(after.approval)
-        && after.requestedStart == before.requestedStart
-        && after.requestedEnd == before.requestedEnd
-        && after.durationMinutes == before.durationMinutes
-        && after.updatedAt is timestamp;
+        && after.updatedAt is timestamp
+        && (
+          (timeUnchanged(before, after))
+          || validBookingManagerReschedule(before, after)
+          || validBookingManagerCancel(before, after)
+        );
+    }
+
+    function validBookingManagerReschedule(before, after) {
+      return after.status == 'pending'
+        && after.requestedStart is timestamp
+        && after.requestedEnd is timestamp
+        && after.durationMinutes is number
+        && (after.requestedStart != before.requestedStart
+            || after.requestedEnd != before.requestedEnd
+            || after.durationMinutes != before.durationMinutes)
+        && after.confirmedStart == null
+        && after.confirmedEnd == null
+        && (after.approval.requiresEngineerApproval == true || after.approval.requiresStudioApproval == true);
+    }
+
+    function validBookingManagerCancel(before, after) {
+      return after.status == 'cancelled'
+        && timeUnchanged(before, after)
+        && approvalsCleared(after.approval)
+        && after.confirmedStart == null
+        && after.confirmedEnd == null;
     }
 
     match /profiles/{userId} {
@@ -277,7 +343,11 @@ service cloud.firestore {
       allow read: if resource != null && isBookingParticipantData(resource.data);
       allow create: if validBookingCreate(request.resource.data);
       allow update: if resource != null && (
-          (resource.data.artistId == request.auth.uid && validBookingArtistUpdate(resource.data, request.resource.data))
+          (resource.data.artistId == request.auth.uid && (
+              validBookingArtistUpdate(resource.data, request.resource.data)
+              || validBookingArtistCancel(resource.data, request.resource.data)
+              || validBookingArtistReschedule(resource.data, request.resource.data)
+            ))
           || (isStudioOwnerById(resource.data.studioId) && validBookingManagerUpdate(resource.data, request.resource.data))
           || (resource.data.engineerId == request.auth.uid && validBookingManagerUpdate(resource.data, request.resource.data))
         );

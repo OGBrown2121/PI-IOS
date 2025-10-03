@@ -53,18 +53,22 @@ struct EngineerAvailabilityManagementView: View {
     }
 
     private var premiumSection: some View {
-        Section("Premium Settings") {
+        Section("Session Approvals") {
             Toggle("Premium plan", isOn: Binding(
                 get: { viewModel.engineer.engineerSettings.isPremium },
                 set: { newValue in Task { await viewModel.togglePremium(newValue) } }
             ))
             .toggleStyle(.switch)
 
-            Toggle("Enable instant booking", isOn: Binding(
-                get: { viewModel.engineer.engineerSettings.instantBookEnabled },
-                set: { newValue in Task { await viewModel.toggleInstantBook(newValue) } }
+            Toggle("Engineer must approve sessions", isOn: Binding(
+                get: { !viewModel.engineer.engineerSettings.instantBookEnabled },
+                set: { newValue in Task { await viewModel.setEngineerRequiresApproval(newValue) } }
             ))
-            .disabled(viewModel.engineer.engineerSettings.isPremium == false)
+            .toggleStyle(.switch)
+
+            Text("Turn this off to auto-confirm sessions when your premium plan is active and the studio already approved.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
 
             Toggle("Allow other studios", isOn: Binding(
                 get: { viewModel.engineer.engineerSettings.allowOtherStudios },

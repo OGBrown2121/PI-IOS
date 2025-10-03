@@ -9,6 +9,7 @@ struct BookingFlowView: View {
         studio: Studio,
         preferredEngineerId: String? = nil,
         bookingService: any BookingService,
+        firestoreService: any FirestoreService,
         currentUserProvider: @escaping () -> UserProfile?
     ) {
         _viewModel = StateObject(
@@ -16,6 +17,7 @@ struct BookingFlowView: View {
                 studio: studio,
                 preferredEngineerId: preferredEngineerId,
                 bookingService: bookingService,
+                firestoreService: firestoreService,
                 currentUserProvider: currentUserProvider
             )
         )
@@ -38,16 +40,25 @@ struct BookingFlowView: View {
         }
         .task { await viewModel.load() }
         .onChange(of: viewModel.startDate) { _ in
-            Task { await viewModel.refreshQuote() }
+            Task {
+                await viewModel.refreshQuote()
+                await viewModel.refreshEngineerAvailability()
+            }
         }
         .onChange(of: viewModel.durationMinutes) { _ in
             Task { await viewModel.refreshQuote() }
         }
         .onChange(of: viewModel.selectedRoom?.id) { _ in
-            Task { await viewModel.refreshQuote() }
+            Task {
+                await viewModel.refreshQuote()
+                await viewModel.refreshEngineerAvailability()
+            }
         }
         .onChange(of: viewModel.selectedEngineer?.id) { _ in
-            Task { await viewModel.refreshQuote() }
+            Task {
+                await viewModel.refreshQuote()
+                await viewModel.refreshEngineerAvailability()
+            }
         }
     }
 
@@ -113,6 +124,39 @@ struct BookingFlowView: View {
                 }
             }
 
+            Section("Engineer Availability") {
+                if viewModel.isLoadingEngineerAvailability {
+                    ProgressView()
+                        .frame(maxWidth: .infinity, alignment: .center)
+                } else if let message = viewModel.engineerAvailabilityMessage {
+                    Text(message)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else if viewModel.engineerAvailabilityLines.isEmpty {
+                    Text("Select a different day to view open times.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(viewModel.engineerAvailabilityLines) { line in
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: "clock")
+                                    .foregroundStyle(.primary)
+                                    .font(.footnote)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(line.title)
+                                        .font(.subheadline.weight(.semibold))
+                                    Text(line.subtitle)
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+
             Section("Project Notes") {
                 TextEditor(text: $viewModel.notes)
                     .frame(minHeight: 120)
@@ -168,6 +212,18 @@ struct BookingFlowView: View {
                         .font(.footnote.weight(.semibold))
                         .foregroundStyle(.green)
                         .padding(.top, 4)
+                        .task {
+                            guard let booking = viewModel.submittedBooking else { return }
+                            // For instantly confirmed bookings, close right away.
+                            if booking.status == .confirmed {
+                                dismiss()
+                                return
+                            }
+
+                            // For pending requests, give users a brief acknowledgement before closing.
+                            try? await Task.sleep(nanoseconds: 1_500_000_000)
+                            dismiss()
+                        }
                 }
             }
         }

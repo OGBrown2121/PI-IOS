@@ -49,9 +49,20 @@ final class EngineerAvailabilityManagementViewModel: ObservableObject {
         await persistProfile(message: "Premium updated")
     }
 
-    func toggleInstantBook(_ isOn: Bool) async {
-        engineer.engineerSettings.instantBookEnabled = isOn
-        await persistProfile(message: isOn ? "Instant book enabled" : "Instant book disabled")
+    func setEngineerRequiresApproval(_ requiresApproval: Bool) async {
+        if requiresApproval {
+            engineer.engineerSettings.instantBookEnabled = false
+            await persistProfile(message: "Engineer approval required")
+            return
+        }
+
+        guard engineer.engineerSettings.isPremium else {
+            statusMessage = "Enable the premium plan to auto-approve sessions."
+            return
+        }
+
+        engineer.engineerSettings.instantBookEnabled = true
+        await persistProfile(message: "Engineer auto-approval enabled")
     }
 
     func toggleAllowOtherStudios(_ isOn: Bool) async {

@@ -16,22 +16,28 @@ final class BookingFlowViewModel: ObservableObject {
     @Published var isSubmitting = false
     @Published var submissionErrorMessage: String?
     @Published var submittedBooking: Booking?
+    @Published private(set) var engineerAvailabilityLines: [EngineerAvailabilityLine] = []
+    @Published private(set) var engineerAvailabilityMessage: String?
+    @Published private(set) var isLoadingEngineerAvailability = false
 
     let studio: Studio
     let preferredEngineerId: String?
 
     private let bookingService: any BookingService
+    private let firestoreService: any FirestoreService
     private let currentUserProvider: () -> UserProfile?
 
     init(
         studio: Studio,
         preferredEngineerId: String?,
         bookingService: any BookingService,
+        firestoreService: any FirestoreService,
         currentUserProvider: @escaping () -> UserProfile?
     ) {
         self.studio = studio
         self.preferredEngineerId = preferredEngineerId
         self.bookingService = bookingService
+        self.firestoreService = firestoreService
         self.currentUserProvider = currentUserProvider
         self.startDate = BookingFlowViewModel.defaultStartDate()
         self.durationMinutes = 120
@@ -82,6 +88,7 @@ final class BookingFlowViewModel: ObservableObject {
             }
             loadErrorMessage = nil
             await refreshQuote()
+            await refreshEngineerAvailability()
         } catch {
             loadErrorMessage = error.localizedDescription
         }
@@ -164,6 +171,45 @@ final class BookingFlowViewModel: ObservableObject {
         stride(from: 60, through: 6 * 60, by: 30).map { $0 }
     }
 
+    func refreshEngineerAvailability() async {
+        guard isLoadingEngineerAvailability == false else { return }
+        guard let _ = context else { return }
+        guard let engineer = selectedEngineer else {
+            engineerAvailabilityLines = []
+            engineerAvailabilityMessage = "Select an engineer to view availability."
+            return
+        }
+
+        isLoadingEngineerAvailability = true
+        engineerAvailabilityMessage = nil
+        engineerAvailabilityLines = []
+        defer { isLoadingEngineerAvailability = false }
+
+        do {
+            async let availabilityTask = firestoreService.fetchAvailability(scope: .engineer, ownerId: engineer.id)
+            async let engineerBookingsTask = bookingService.fetchBookings(for: engineer.id, role: .engineer)
+            async let roomBookingsTask = bookingService.fetchBookings(for: studio.id, role: .studio)
+
+            let availabilityEntries = try await availabilityTask
+            let engineerBookings = try await engineerBookingsTask
+            let studioBookings = try await roomBookingsTask
+
+            let lines = computeEngineerAvailability(
+                engineer: engineer,
+                availabilityEntries: availabilityEntries,
+                engineerBookings: engineerBookings,
+                studioBookings: studioBookings
+            )
+
+            if lines.isEmpty {
+                engineerAvailabilityMessage = "Fully booked on selected day."
+            }
+            engineerAvailabilityLines = lines
+        } catch {
+            engineerAvailabilityMessage = error.localizedDescription
+        }
+    }
+
     private static func defaultStartDate() -> Date {
         let now = Date()
         let calendar = Calendar.current
@@ -171,5 +217,216 @@ final class BookingFlowViewModel: ObservableObject {
             return nextHour
         }
         return now.addingTimeInterval(3600)
+    }
+}
+
+extension BookingFlowViewModel {
+    struct EngineerAvailabilityLine: Identifiable, Equatable {
+        let id: UUID = UUID()
+        let title: String
+        let subtitle: String
+    }
+}
+
+private extension BookingFlowViewModel {
+    func computeEngineerAvailability(
+        engineer: UserProfile,
+        availabilityEntries: [AvailabilityEntry],
+        engineerBookings: [Booking],
+        studioBookings: [Booking]
+    ) -> [EngineerAvailabilityLine] {
+        let timezone = TimeZone(identifier: studio.operatingSchedule.timeZoneIdentifier) ?? .current
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timezone
+
+        let dayStart = calendar.startOfDay(for: startDate)
+        guard let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) else { return [] }
+
+        if studio.operatingSchedule.blackoutDates.contains(where: { calendar.isDate($0, inSameDayAs: dayStart) }) {
+            return []
+        }
+
+        let baseWindows = baseWindowsForSelectedDay(dayStart: dayStart, dayEnd: dayEnd, calendar: calendar)
+        guard baseWindows.isEmpty == false else { return [] }
+
+        var openIntervals = baseWindows
+
+        let busyIntervals = busyIntervalsForEngineer(
+            availabilityEntries: availabilityEntries,
+            engineerBookings: engineerBookings,
+            studioBookings: studioBookings,
+            dayStart: dayStart,
+            dayEnd: dayEnd,
+            calendar: calendar
+        )
+
+        for interval in busyIntervals {
+            openIntervals = subtract(openIntervals, removing: interval)
+        }
+
+        let formatter = timeFormatter(for: timezone)
+
+        let windowTitle = selectedRoom?.name ?? "Available"
+
+        let labels = openIntervals
+            .sorted { $0.start < $1.start }
+            .map { interval -> EngineerAvailabilityLine in
+                let startLabel = formatter.string(from: interval.start)
+                let adjustedEnd: Date
+                if interval.end >= dayEnd {
+                    adjustedEnd = (calendar.date(byAdding: .minute, value: -1, to: dayEnd) ?? interval.end)
+                } else {
+                    adjustedEnd = interval.end
+                }
+                let endLabel = formatter.string(from: adjustedEnd)
+                return EngineerAvailabilityLine(title: windowTitle, subtitle: "\(startLabel) – \(endLabel)")
+            }
+
+        return labels
+    }
+
+    func baseWindowsForSelectedDay(dayStart: Date, dayEnd: Date, calendar: Calendar) -> [DateInterval] {
+        let schedule = studio.operatingSchedule
+        if schedule.recurringHours.isEmpty {
+            return [DateInterval(start: dayStart, end: dayEnd)]
+        }
+
+        let weekdayComponent = calendar.component(.weekday, from: dayStart)
+        let normalizedWeekday = (weekdayComponent + 6) % 7
+
+        let windows = schedule.recurringHours
+            .filter { $0.weekday == normalizedWeekday }
+            .sorted { $0.startTimeMinutes < $1.startTimeMinutes }
+
+        return windows.compactMap { window in
+            guard let start = calendar.date(byAdding: .minute, value: window.startTimeMinutes, to: dayStart) else { return nil }
+            let end = min(start.addingTimeInterval(TimeInterval(window.durationMinutes * 60)), dayEnd)
+            guard start < end else { return nil }
+            return DateInterval(start: start, end: end)
+        }
+    }
+
+    func busyIntervalsForEngineer(
+        availabilityEntries: [AvailabilityEntry],
+        engineerBookings: [Booking],
+        studioBookings: [Booking],
+        dayStart: Date,
+        dayEnd: Date,
+        calendar: Calendar
+    ) -> [DateInterval] {
+        var busy: [DateInterval] = []
+
+        let relevantStatuses: Set<BookingStatus> = [.pending, .confirmed, .rescheduled]
+
+        for booking in engineerBookings where relevantStatuses.contains(booking.status) {
+            if let interval = clampedInterval(for: booking, dayStart: dayStart, dayEnd: dayEnd) {
+                busy.append(interval)
+            }
+        }
+
+        if let selectedRoom = selectedRoom {
+            for booking in studioBookings where booking.roomId == selectedRoom.id && relevantStatuses.contains(booking.status) {
+                if let interval = clampedInterval(for: booking, dayStart: dayStart, dayEnd: dayEnd) {
+                    busy.append(interval)
+                }
+            }
+        }
+
+        for entry in availabilityEntries {
+            switch entry.kind {
+            case .block, .bookingHold, .selfBooking:
+                if let interval = interval(for: entry, dayStart: dayStart, dayEnd: dayEnd, calendar: calendar) {
+                    busy.append(interval)
+                }
+            case .recurring:
+                if let interval = recurringInterval(entry, dayStart: dayStart, dayEnd: dayEnd, calendar: calendar) {
+                    // Treat recurring blocks as unavailable time
+                    busy.append(interval)
+                }
+            }
+        }
+
+        return mergeOverlapping(busy)
+    }
+
+    func clampedInterval(for booking: Booking, dayStart: Date, dayEnd: Date) -> DateInterval? {
+        let start = booking.confirmedStart ?? booking.requestedStart
+        let end = booking.confirmedEnd ?? booking.requestedEnd
+        let clampedStart = max(start, dayStart)
+        let clampedEnd = min(end, dayEnd)
+        guard clampedStart < clampedEnd else { return nil }
+        return DateInterval(start: clampedStart, end: clampedEnd)
+    }
+
+    func interval(for entry: AvailabilityEntry, dayStart: Date, dayEnd: Date, calendar: Calendar) -> DateInterval? {
+        guard let startDate = entry.startDate, let endDate = entry.endDate else { return nil }
+        let clampedStart = max(startDate, dayStart)
+        let clampedEnd = min(endDate, dayEnd)
+        guard clampedStart < clampedEnd else { return nil }
+        return DateInterval(start: clampedStart, end: clampedEnd)
+    }
+
+    func recurringInterval(_ entry: AvailabilityEntry, dayStart: Date, dayEnd: Date, calendar: Calendar) -> DateInterval? {
+        guard let weekday = entry.weekday, let startMinutes = entry.startTimeMinutes else { return nil }
+        let weekdayComponent = calendar.component(.weekday, from: dayStart)
+        let normalizedWeekday = (weekdayComponent + 6) % 7
+        guard weekday == normalizedWeekday else { return nil }
+
+        guard let start = calendar.date(byAdding: .minute, value: startMinutes, to: dayStart) else { return nil }
+        let end = min(start.addingTimeInterval(TimeInterval(entry.durationMinutes * 60)), dayEnd)
+        guard start < end else { return nil }
+        return DateInterval(start: start, end: end)
+    }
+
+    func subtract(_ intervals: [DateInterval], removing removal: DateInterval) -> [DateInterval] {
+        guard removal.duration > 0 else { return intervals }
+        var result: [DateInterval] = []
+        for interval in intervals {
+            guard interval.intersects(removal) else {
+                result.append(interval)
+                continue
+            }
+
+            let overlapStart = max(interval.start, removal.start)
+            let overlapEnd = min(interval.end, removal.end)
+            guard overlapStart < overlapEnd else {
+                result.append(interval)
+                continue
+            }
+
+            if interval.start < overlapStart {
+                result.append(DateInterval(start: interval.start, end: overlapStart))
+            }
+            if overlapEnd < interval.end {
+                result.append(DateInterval(start: overlapEnd, end: interval.end))
+            }
+        }
+        return result
+    }
+
+    func mergeOverlapping(_ intervals: [DateInterval]) -> [DateInterval] {
+        guard intervals.isEmpty == false else { return [] }
+        let sorted = intervals.sorted { $0.start < $1.start }
+        var merged: [DateInterval] = []
+        var current = sorted[0]
+
+        for interval in sorted.dropFirst() {
+            if current.end >= interval.start {
+                current = DateInterval(start: min(current.start, interval.start), end: max(current.end, interval.end))
+            } else {
+                merged.append(current)
+                current = interval
+            }
+        }
+        merged.append(current)
+        return merged
+    }
+
+    func timeFormatter(for timezone: TimeZone) -> DateFormatter {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        formatter.timeZone = timezone
+        return formatter
     }
 }

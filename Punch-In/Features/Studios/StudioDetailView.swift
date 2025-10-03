@@ -18,12 +18,16 @@ struct StudioDetailView: View {
     @State private var requestErrorMessage: String?
     @State private var observedApprovedEngineerIds: [String]?
     @State private var isBookingPresented = false
+    @State private var todaysAvailability: [RoomAvailabilityLine] = []
+    @State private var availabilityMessage: String?
+    @State private var isLoadingAvailability = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.spacingLarge) {
                 heroHeader
                 quickStatsCard
+                todaysHoursCard
                 if canCurrentUserBook {
                     PrimaryButton(title: "Book this studio") {
                         isBookingPresented = true
@@ -44,6 +48,7 @@ struct StudioDetailView: View {
             updateEngineerStatusCache(with: studio.approvedEngineerIds)
             observedApprovedEngineerIds = studio.approvedEngineerIds
             await loadAcceptedEngineersIfNeeded(force: false)
+            await loadTodayAvailability()
         }
         .onChange(of: studio.approvedEngineerIds) { ids in
             updateEngineerStatusCache(with: ids)
@@ -53,6 +58,7 @@ struct StudioDetailView: View {
             BookingFlowView(
                 studio: studio,
                 bookingService: di.bookingService,
+                firestoreService: di.firestoreService,
                 currentUserProvider: { appState.currentUser }
             )
         }
@@ -170,6 +176,57 @@ struct StudioDetailView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
+    }
+
+    @ViewBuilder
+    private var todaysHoursCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+                Text("Today's Hours")
+                    .font(.headline)
+            }
+
+            if isLoadingAvailability {
+                Text("Checking availability…")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else if let message = availabilityMessage {
+                Text(message)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else if todaysAvailability.isEmpty {
+                Text("No rooms configured")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(todaysAvailability) { line in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(line.roomName)
+                                .font(.subheadline.weight(.semibold))
+                            Text(line.displayText)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+
+            if let timezoneLabel = scheduleTimeZoneAbbreviation {
+                Text(timezoneLabel)
+                    .font(.caption)
+                    .foregroundStyle(Color(uiColor: .tertiaryLabel))
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color(uiColor: .secondarySystemGroupedBackground))
+        )
     }
 
     private var canCurrentUserBook: Bool {
@@ -539,6 +596,167 @@ struct StudioDetailView: View {
         .buttonStyle(.plain)
         .disabled(isProcessingRequest || isCancellingRequest)
     }
+}
+
+private extension StudioDetailView {
+    var scheduleTimeZoneAbbreviation: String? {
+        let identifier = studio.operatingSchedule.timeZoneIdentifier
+        guard let timezone = TimeZone(identifier: identifier) else { return nil }
+        return timezone.abbreviation()
+    }
+
+    @MainActor
+    func loadTodayAvailability() async {
+        guard isLoadingAvailability == false else { return }
+        isLoadingAvailability = true
+        availabilityMessage = nil
+        todaysAvailability = []
+        defer { isLoadingAvailability = false }
+
+        do {
+            async let roomsTask = di.firestoreService.fetchRooms(for: studio.id)
+            async let bookingsTask = di.bookingService.fetchBookings(for: studio.id, role: .studio)
+            let rooms = try await roomsTask
+            let bookings = try await bookingsTask
+            if rooms.isEmpty {
+                availabilityMessage = "No rooms configured"
+                todaysAvailability = []
+                return
+            }
+            let availability = computeAvailability(for: rooms, bookings: bookings)
+            todaysAvailability = availability
+            availabilityMessage = availability.isEmpty ? "No open times today" : nil
+        } catch {
+            availabilityMessage = error.localizedDescription
+        }
+    }
+
+    func computeAvailability(for rooms: [Room], bookings: [Booking]) -> [RoomAvailabilityLine] {
+        let timezone = TimeZone(identifier: studio.operatingSchedule.timeZoneIdentifier) ?? .current
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timezone
+
+        let todayStart = calendar.startOfDay(for: Date())
+        guard let todayEnd = calendar.date(byAdding: .day, value: 1, to: todayStart) else { return [] }
+
+        if studio.operatingSchedule.blackoutDates.contains(where: { calendar.isDate($0, inSameDayAs: todayStart) }) {
+            return rooms.sorted { $0.name < $1.name }.map { room in
+                RoomAvailabilityLine(id: room.id, roomName: room.name, displayText: "Closed today")
+            }
+        }
+
+        let baseWindows = baseOpenWindows(for: todayStart, endOfDay: todayEnd, calendar: calendar)
+        guard baseWindows.isEmpty == false else {
+            return rooms.sorted { $0.name < $1.name }.map { room in
+                RoomAvailabilityLine(id: room.id, roomName: room.name, displayText: "Closed today")
+            }
+        }
+
+        let relevantStatuses: Set<BookingStatus> = [.pending, .confirmed, .rescheduled]
+        let bookingsByRoom = Dictionary(grouping: bookings.filter { relevantStatuses.contains($0.status) }) { $0.roomId }
+
+        let formatter = timeFormatter(for: timezone)
+
+        return rooms.sorted { $0.name < $1.name }.map { room in
+            var openSegments = baseWindows
+            let roomBookings = bookingsByRoom[room.id] ?? []
+
+            for booking in roomBookings {
+                guard let interval = clampedInterval(for: booking, dayStart: todayStart, dayEnd: todayEnd) else { continue }
+                openSegments = subtract(openSegments, removing: interval)
+            }
+
+            let labels = openSegments
+                .sorted { $0.start < $1.start }
+                .map { format(interval: $0, formatter: formatter, dayEnd: todayEnd, calendar: calendar) }
+                .filter { !$0.isEmpty }
+
+            let text = labels.isEmpty ? "Fully booked today" : labels.joined(separator: " • ")
+            return RoomAvailabilityLine(id: room.id, roomName: room.name, displayText: text)
+        }
+    }
+
+    func baseOpenWindows(for dayStart: Date, endOfDay: Date, calendar: Calendar) -> [DateInterval] {
+        let schedule = studio.operatingSchedule
+        if schedule.recurringHours.isEmpty {
+            return [DateInterval(start: dayStart, end: endOfDay)]
+        }
+
+        let weekdayComponent = calendar.component(.weekday, from: dayStart)
+        let normalizedWeekday = (weekdayComponent + 6) % 7
+
+        let windows = schedule.recurringHours
+            .filter { $0.weekday == normalizedWeekday }
+            .sorted { $0.startTimeMinutes < $1.startTimeMinutes }
+
+        return windows.compactMap { window in
+            guard let start = calendar.date(byAdding: .minute, value: window.startTimeMinutes, to: dayStart) else { return nil }
+            let end = min(start.addingTimeInterval(TimeInterval(window.durationMinutes * 60)), endOfDay)
+            guard start < end else { return nil }
+            return DateInterval(start: start, end: end)
+        }
+    }
+
+    func clampedInterval(for booking: Booking, dayStart: Date, dayEnd: Date) -> DateInterval? {
+        let start = booking.confirmedStart ?? booking.requestedStart
+        let end = booking.confirmedEnd ?? booking.requestedEnd
+        let clampedStart = max(start, dayStart)
+        let clampedEnd = min(end, dayEnd)
+        guard clampedStart < clampedEnd else { return nil }
+        return DateInterval(start: clampedStart, end: clampedEnd)
+    }
+
+    func subtract(_ intervals: [DateInterval], removing removal: DateInterval) -> [DateInterval] {
+        var result: [DateInterval] = []
+        for interval in intervals {
+            guard interval.intersects(removal) else {
+                result.append(interval)
+                continue
+            }
+
+            let overlapStart = max(interval.start, removal.start)
+            let overlapEnd = min(interval.end, removal.end)
+            guard overlapStart < overlapEnd else {
+                result.append(interval)
+                continue
+            }
+
+            if interval.start < overlapStart {
+                result.append(DateInterval(start: interval.start, end: overlapStart))
+            }
+
+            if overlapEnd < interval.end {
+                result.append(DateInterval(start: overlapEnd, end: interval.end))
+            }
+        }
+        return result
+    }
+
+    func format(interval: DateInterval, formatter: DateFormatter, dayEnd: Date, calendar: Calendar) -> String {
+        let startString = formatter.string(from: interval.start)
+        let adjustedEnd: Date
+        if interval.end >= dayEnd {
+            adjustedEnd = calendar.date(byAdding: .minute, value: -1, to: dayEnd) ?? interval.end
+        } else {
+            adjustedEnd = interval.end
+        }
+        let endString = formatter.string(from: adjustedEnd)
+        return "\(startString) – \(endString)"
+    }
+
+    func timeFormatter(for timezone: TimeZone) -> DateFormatter {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        formatter.timeZone = timezone
+        return formatter
+    }
+}
+
+private struct RoomAvailabilityLine: Identifiable {
+    let id: String
+    let roomName: String
+    let displayText: String
 }
 
 private struct EngineerRow: View {

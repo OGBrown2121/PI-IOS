@@ -40,9 +40,10 @@ final class StudioAvailabilityManagementViewModel: ObservableObject {
         }
     }
 
-    func toggleAutoApprove() async {
-        studio.autoApproveRequests.toggle()
-        await persistStudioChanges(message: studio.autoApproveRequests ? "Instant booking enabled" : "Instant booking disabled")
+    func setStudioRequiresApproval(_ requiresApproval: Bool) async {
+        studio.autoApproveRequests = requiresApproval == false
+        let message = requiresApproval ? "Studio approval required" : "Studio approval disabled"
+        await persistStudioChanges(message: message)
     }
 
     func addRecurringHour(weekday: Int, startMinutes: Int, durationMinutes: Int) async {

@@ -404,7 +404,25 @@ struct FirebaseFirestoreService: FirestoreService {
 
     func updateBooking(_ booking: Booking) async throws {
         let reference = database.collection("bookings").document(booking.id)
-        let payload = encodeBooking(booking)
+        var payload = encodeBooking(booking)
+
+        if booking.confirmedStart == nil {
+            payload["confirmedStart"] = NSNull()
+        }
+
+        if booking.confirmedEnd == nil {
+            payload["confirmedEnd"] = NSNull()
+        }
+
+        if var approval = payload["approval"] as? [String: Any] {
+            if booking.approval.resolvedBy == nil {
+                approval["resolvedBy"] = NSNull()
+            }
+            if booking.approval.resolvedAt == nil {
+                approval["resolvedAt"] = NSNull()
+            }
+            payload["approval"] = approval
+        }
 #if DEBUG
         print("[FirestoreService] updateBooking payload:", payload)
         print("[FirestoreService] updateBooking field types:", [
