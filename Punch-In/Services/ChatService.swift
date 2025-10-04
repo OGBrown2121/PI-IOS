@@ -236,6 +236,8 @@ final class FirestoreChatService: ChatService {
         kind: ChatThread.Kind,
         groupSettings: ChatThread.GroupSettings?
     ) async throws -> ChatThread {
+        let authUserId = currentUserId() ?? creator.id
+
         var uniqueParticipants: [ChatParticipant] = []
         var seen = Set<String>()
         for participant in participants + [creator] {
@@ -244,36 +246,91 @@ final class FirestoreChatService: ChatService {
             }
         }
 
-        let document = firestore.collection(Field.conversations).document()
+        let normalizedParticipants: [ChatParticipant] = uniqueParticipants.map { participant in
+            guard participant.id == creator.id else { return participant }
+            guard case let .user(profile) = participant.kind else { return participant }
+            guard profile.id != authUserId else { return participant }
 
-        var storedGroupSettings = groupSettings
-        if var settings = groupSettings, let media = settings.photo, media.remoteURL == nil, media.imageData != nil {
-            let uploaded = try await ensureMediaUploaded(media, conversationId: document.documentID, messageId: "group-photo")
-            settings.photo = uploaded
-            storedGroupSettings = settings
+            let normalizedProfile = UserProfile(
+                id: authUserId,
+                username: profile.username,
+                displayName: profile.displayName,
+                createdAt: profile.createdAt,
+                profileImageURL: profile.profileImageURL,
+                accountType: profile.accountType,
+                profileDetails: profile.profileDetails,
+                contact: profile.contact,
+                engineerSettings: profile.engineerSettings
+            )
+            return ChatParticipant(user: normalizedProfile)
         }
 
+        let document = firestore.collection(Field.conversations).document()
+
+        var finalGroupSettings = groupSettings
+        let creationGroupSettings: ChatThread.GroupSettings? = {
+            guard var settings = groupSettings,
+                  let media = settings.photo,
+                  media.remoteURL == nil,
+                  media.imageData != nil else {
+                return groupSettings
+            }
+            settings.photo = nil
+            return settings
+        }()
+
+        let participantIds = normalizedParticipants.map(\.id)
+
+        Logger.log("Resolved auth uid: \(authUserId)")
+        Logger.log("Resolved participant ids: \(participantIds)")
+
         var data: [String: Any] = [
-            Field.creatorId: creator.id,
+            Field.creatorId: authUserId,
             Field.kind: kind == .group ? "group" : "direct",
-            Field.participantIds: uniqueParticipants.map(\.id),
-            Field.participants: uniqueParticipants.map(encodeParticipant(_:)),
+            Field.participantIds: participantIds,
+            Field.participants: normalizedParticipants.map(encodeParticipant(_:)),
             Field.createdAt: Timestamp(date: dateProvider()),
             Field.dataVersion: 1
         ]
 
-        if let settings = storedGroupSettings {
-            data[Field.groupSettings] = encodeGroupSettings(settings)
+        if let participantIdsValue = data[Field.participantIds] {
+            Logger.log("participantIds value type: \(type(of: participantIdsValue))")
         }
+
+        if let settings = creationGroupSettings {
+            data[Field.groupSettings] = encodeGroupSettings(settings)
+        } else {
+            data[Field.groupSettings] = NSNull()
+        }
+
+        Logger.log(
+            "Creating conversation \(document.documentID) as \(authUserId) with participants \(participantIds.joined(separator: ",")) kind=\(kind == .group ? "group" : "direct")"
+        )
 
         try await document.setData(data)
 
+        if var settings = groupSettings,
+           let media = settings.photo,
+           media.remoteURL == nil,
+           media.imageData != nil {
+            let uploaded = try await ensureMediaUploaded(media, conversationId: document.documentID, messageId: "group-photo")
+            settings.photo = uploaded
+            do {
+                try await document.updateData([
+                    Field.groupSettings: encodeGroupSettings(settings)
+                ])
+                finalGroupSettings = settings
+            } catch {
+                Logger.log("Failed to persist uploaded group photo for conversation \(document.documentID): \(error.localizedDescription)")
+            }
+        }
+
         let thread = ChatThread(
             id: document.documentID,
-            creatorId: creator.id,
-            participants: uniqueParticipants,
+            creatorId: authUserId,
+            participants: normalizedParticipants,
             kind: kind,
-            groupSettings: storedGroupSettings,
+            groupSettings: finalGroupSettings,
             lastMessageAt: nil,
             messages: []
         )
