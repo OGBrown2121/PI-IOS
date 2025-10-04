@@ -305,41 +305,33 @@ struct StudioEditorView: View {
 
     private func loadImage(from item: PhotosPickerItem, assignToCover: Bool) async {
         do {
-            if let data = try await item.loadTransferable(type: Data.self),
-               let uiImage = UIImage(data: data) {
-                let processed: (Data, String)?
-
-                if assignToCover {
-                    if let jpeg = uiImage.jpegData(compressionQuality: 0.85) {
-                        processed = (jpeg, "image/jpeg")
-                    } else {
-                        processed = nil
-                    }
-                } else {
-                    if let png = uiImage.pngData() {
-                        processed = (png, "image/png")
-                    } else if let jpeg = uiImage.jpegData(compressionQuality: 0.9) {
-                        processed = (jpeg, "image/jpeg")
-                    } else {
-                        processed = nil
-                    }
-                }
-
-                guard let (finalData, contentType) = processed else { return }
-
+            guard let data = try await item.loadTransferable(type: Data.self),
+                  let uiImage = UIImage(data: data) else {
                 await MainActor.run {
-                    let image = Image(uiImage: uiImage)
-                    if assignToCover {
-                        coverPreviewImage = image
-                        coverImageData = finalData
-                        coverImageContentType = contentType
-                        removeCoverImage = false
-                    } else {
-                        logoPreviewImage = image
-                        logoImageData = finalData
-                        logoImageContentType = contentType
-                        removeLogoImage = false
-                    }
+                    errorMessage = "We couldn't load that image. Try another file."
+                }
+                return
+            }
+
+            guard let processed = processImage(uiImage, kind: assignToCover ? .cover : .logo) else {
+                await MainActor.run {
+                    errorMessage = "That image is too large. Pick one under 8 MB."
+                }
+                return
+            }
+
+            await MainActor.run {
+                let image = Image(uiImage: processed.displayImage)
+                if assignToCover {
+                    coverPreviewImage = image
+                    coverImageData = processed.data
+                    coverImageContentType = processed.contentType
+                    removeCoverImage = false
+                } else {
+                    logoPreviewImage = image
+                    logoImageData = processed.data
+                    logoImageContentType = processed.contentType
+                    removeLogoImage = false
                 }
             }
         } catch {
@@ -388,5 +380,64 @@ struct StudioEditorData {
             .split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+    }
+}
+
+private enum StudioImageKind {
+    case cover
+    case logo
+}
+
+private extension StudioEditorView {
+    static let maxUploadBytes = 8 * 1_024 * 1_024
+
+    func processImage(_ image: UIImage, kind: StudioImageKind) -> (data: Data, contentType: String, displayImage: UIImage)? {
+        let maxDimension: CGFloat = kind == .cover ? 2048 : 1024
+        let resized = resize(image, maxDimension: maxDimension)
+
+        if kind == .cover {
+            let qualities: [CGFloat] = stride(from: 0.85, through: 0.5, by: -0.1).map { CGFloat($0) }
+            return compressJPEG(resized, qualities: qualities)
+        }
+
+        if imageHasAlpha(resized), let png = resized.pngData(), png.count <= Self.maxUploadBytes {
+            return (png, "image/png", resized)
+        }
+
+        let qualities: [CGFloat] = stride(from: 0.9, through: 0.5, by: -0.1).map { CGFloat($0) }
+        return compressJPEG(resized, qualities: qualities)
+    }
+
+    func compressJPEG(_ image: UIImage, qualities: [CGFloat]) -> (Data, String, UIImage)? {
+        for quality in qualities {
+            if let data = image.jpegData(compressionQuality: quality), data.count <= Self.maxUploadBytes {
+                return (data, "image/jpeg", image)
+            }
+        }
+        return nil
+    }
+
+    func resize(_ image: UIImage, maxDimension: CGFloat) -> UIImage {
+        let maxSide = max(image.size.width, image.size.height)
+        guard maxSide > maxDimension else { return image }
+
+        let scale = maxDimension / maxSide
+        let newSize = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = image.scale
+        let renderer = UIGraphicsImageRenderer(size: newSize, format: format)
+        return renderer.image { _ in
+            image.draw(in: CGRect(origin: .zero, size: newSize))
+        }
+    }
+
+    func imageHasAlpha(_ image: UIImage) -> Bool {
+        guard let alphaInfo = image.cgImage?.alphaInfo else { return false }
+        switch alphaInfo {
+        case .first, .last, .premultipliedFirst, .premultipliedLast:
+            return true
+        default:
+            return false
+        }
     }
 }

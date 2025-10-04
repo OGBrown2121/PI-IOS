@@ -205,6 +205,6 @@ final class OnboardingViewModel: ObservableObject {
     }
 
     private func profileImagePath(for userId: String) -> String {
-        "profiles/\(userId)/avatar.jpg"
+        "users/\(userId)/profile/avatar.jpg"
     }
 }

@@ -17,7 +17,7 @@ const tokenize = (...values) =>
 
 export const profileSearchTokens = functions
   .region('us-central1')
-  .firestore.document('profiles/{userId}')
+  .firestore.document('users/{userId}')
   .onWrite(async change => {
     const data = change.after.exists ? change.after.data() : null;
     if (!data) {
@@ -132,15 +132,15 @@ async function ensureBookingHolds(booking, bookingId) {
 
   await Promise.all([
     db
-      .collection('studioAvailability')
+      .collection('studios')
       .doc(booking.studioId)
-      .collection('entries')
+      .collection('availability')
       .doc(bookingId)
       .set(studioEntry, { merge: true }),
     db
-      .collection('engineerAvailability')
+      .collection('users')
       .doc(booking.engineerId)
-      .collection('entries')
+      .collection('availability')
       .doc(bookingId)
       .set(engineerEntry, { merge: true }),
   ]);
@@ -149,16 +149,16 @@ async function ensureBookingHolds(booking, bookingId) {
 async function removeBookingHolds(booking, bookingId) {
   await Promise.all([
     db
-      .collection('studioAvailability')
+      .collection('studios')
       .doc(booking.studioId)
-      .collection('entries')
+      .collection('availability')
       .doc(bookingId)
       .delete()
       .catch(() => null),
     db
-      .collection('engineerAvailability')
+      .collection('users')
       .doc(booking.engineerId)
-      .collection('entries')
+      .collection('availability')
       .doc(bookingId)
       .delete()
       .catch(() => null),

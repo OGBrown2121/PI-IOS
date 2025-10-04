@@ -15,6 +15,9 @@ struct EngineerDetailView: View {
     @State private var isBookingPresented = false
     @State private var selectedStudio: Studio?
     @State private var isSelectingStudio = false
+    @State private var reviews: [Review] = []
+    @State private var isLoadingReviews = false
+    @State private var reviewsErrorMessage: String?
 
     init(engineerId: String, profile: UserProfile? = nil) {
         self.engineerId = engineerId
@@ -29,6 +32,7 @@ struct EngineerDetailView: View {
                         heroSection(for: profile)
                         expertiseSection(for: profile)
                         detailsSection(for: profile)
+                        reviewsSection
                         collaborationSection(for: profile)
                         if canCurrentUserBook {
                             PrimaryButton(title: "Book with \(profile.displayName.isEmpty ? profile.username : profile.displayName)") {
@@ -63,6 +67,7 @@ struct EngineerDetailView: View {
         .task {
             await loadProfileIfNeeded()
             await loadStudiosIfNeeded()
+            await loadReviews()
         }
         .sheet(isPresented: $isBookingPresented) {
             if let studio = selectedStudio, let profile {
@@ -161,6 +166,117 @@ struct EngineerDetailView: View {
         }
     }
 
+    private var reviewsSection: some View {
+        VStack(alignment: .leading, spacing: Theme.spacingSmall) {
+            Label("Reviews", systemImage: "star.circle.fill")
+                .font(.headline)
+
+            if isLoadingReviews {
+                ProgressView()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else if let message = reviewsErrorMessage {
+                Text(message)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            } else if reviews.isEmpty {
+                Text("No reviews yet. Sessions completed with this engineer will appear here.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else {
+                reviewRatingSummary
+                Divider()
+                let featuredReviews = engineerTopReviews
+                ForEach(Array(featuredReviews.enumerated()), id: \.element.id) { entry in
+                    let review = entry.element
+                    let index = entry.offset
+                    reviewRow(for: review)
+                    if index < featuredReviews.count - 1 {
+                        Divider()
+                    }
+                }
+            }
+        }
+    }
+
+    private var reviewRatingSummary: some View {
+        HStack(spacing: 12) {
+            HStack(spacing: 4) {
+                Image(systemName: "star.fill")
+                    .foregroundStyle(Color.yellow)
+                Text(engineerAverageRatingText)
+                    .font(.title3.weight(.semibold))
+            }
+
+            Text("\(reviews.count) review\(reviews.count == 1 ? "" : "s")")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var engineerAverageRatingText: String {
+        guard let rating = engineerAverageRating else { return "–" }
+        return String(format: "%.1f", rating)
+    }
+
+    private var engineerAverageRating: Double? {
+        guard reviews.isEmpty == false else { return nil }
+        let total = reviews.reduce(0.0) { $0 + Double($1.rating) }
+        return total / Double(reviews.count)
+    }
+
+    private var engineerTopReviews: [Review] {
+        Array(engineerSortedReviews.prefix(3))
+    }
+
+    private var engineerSortedReviews: [Review] {
+        reviews.sorted { $0.createdAt > $1.createdAt }
+    }
+
+    private func reviewRow(for review: Review) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                starRow(for: review.rating)
+                Text(review.reviewerAccountType.title)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text(formattedReviewDate(review.createdAt))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if review.comment.trimmed.isEmpty == false {
+                Text(review.comment)
+                    .font(.footnote)
+            } else {
+                Text("No written feedback provided.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func starRow(for rating: Int) -> some View {
+        HStack(spacing: 2) {
+            ForEach(1...5, id: \.self) { value in
+                Image(systemName: value <= rating ? "star.fill" : "star")
+                    .font(.caption)
+                    .foregroundStyle(value <= rating ? Color.yellow : Color.secondary)
+            }
+        }
+    }
+
+    private func formattedReviewDate(_ date: Date) -> String {
+        Self.reviewDateFormatter.string(from: date)
+    }
+
+    private static let reviewDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .none
+        return formatter
+    }()
+
     private func collaborationSection(for profile: UserProfile) -> some View {
         sectionCard(title: "Collaboration", icon: "waveform.path.ecg") {
             Text("Interested in working with \(profile.displayName.isEmpty ? profile.username : profile.displayName)? Reach out through chat or invite them to a project once booking launches.")
@@ -195,6 +311,20 @@ struct EngineerDetailView: View {
         } catch {
             studiosErrorMessage = error.localizedDescription
         }
+    }
+
+    private func loadReviews() async {
+        guard isLoadingReviews == false else { return }
+        isLoadingReviews = true
+        reviewsErrorMessage = nil
+
+        do {
+            reviews = try await di.reviewService.fetchReviews(for: engineerId, kind: .engineer)
+        } catch {
+            reviewsErrorMessage = error.localizedDescription
+        }
+
+        isLoadingReviews = false
     }
 
     private var canCurrentUserBook: Bool {

@@ -6,12 +6,14 @@ struct BookingInboxView: View {
     init(
         bookingService: any BookingService,
         firestoreService: any FirestoreService,
+        reviewService: any ReviewService,
         currentUserProvider: @escaping () -> UserProfile?
     ) {
         _viewModel = StateObject(
             wrappedValue: BookingInboxViewModel(
                 bookingService: bookingService,
                 firestoreService: firestoreService,
+                reviewService: reviewService,
                 currentUserProvider: currentUserProvider
             )
         )
@@ -80,6 +82,8 @@ private struct InboxContent: View {
     @State private var bookingToReschedule: Booking?
     @State private var bookingToCancel: Booking?
     @State private var showCancelDialog = false
+    @State private var reviewTask: BookingInboxViewModel.ReviewTask?
+    @State private var bookingForDetails: Booking?
 
     var body: some View {
         VStack(spacing: 12) {
@@ -92,6 +96,14 @@ private struct InboxContent: View {
             .padding(.horizontal)
             .padding(.top)
 
+            if viewModel.pendingReviews.isEmpty == false {
+                PendingReviewsSection(
+                    tasks: viewModel.pendingReviews,
+                    onSelect: { task in reviewTask = task },
+                    onHide: { task in viewModel.hideReviewReminder(for: task) }
+                )
+            }
+
             if viewModel.displayMode == .list {
                 BookingListView(
                     pending: pending,
@@ -103,7 +115,8 @@ private struct InboxContent: View {
                     onCancel: { booking in
                         bookingToCancel = booking
                         showCancelDialog = true
-                    }
+                    },
+                    onSelect: { bookingForDetails = $0 }
                 )
             } else if viewModel.displayMode == .schedule {
                 EngineerScheduleView()
@@ -114,7 +127,8 @@ private struct InboxContent: View {
                     onCancel: { booking in
                         bookingToCancel = booking
                         showCancelDialog = true
-                    }
+                    },
+                    onSelect: { bookingForDetails = $0 }
                 )
             }
         }
@@ -126,6 +140,16 @@ private struct InboxContent: View {
             ) { start, duration in
                 Task {
                     await viewModel.reschedule(booking, to: start, durationMinutes: duration)
+                }
+            }
+        }
+        .sheet(item: $reviewTask) { task in
+            ReviewComposerSheet(task: task) { responses in
+                Task {
+                    await viewModel.submitReviews(task: task, responses: responses)
+                    await MainActor.run {
+                        reviewTask = nil
+                    }
                 }
             }
         }
@@ -147,6 +171,9 @@ private struct InboxContent: View {
         } message: { _ in
             Text("This will notify everyone that the session is cancelled.")
         }
+        .sheet(item: $bookingForDetails) { booking in
+            BookingDetailSheet(booking: booking)
+        }
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Menu {
@@ -162,6 +189,84 @@ private struct InboxContent: View {
     }
 }
 
+private struct PendingReviewsSection: View {
+    @EnvironmentObject private var viewModel: BookingInboxViewModel
+
+    let tasks: [BookingInboxViewModel.ReviewTask]
+    let onSelect: (BookingInboxViewModel.ReviewTask) -> Void
+    let onHide: (BookingInboxViewModel.ReviewTask) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Awaiting your review", systemImage: "star.bubble")
+                .font(.headline)
+                .padding(.horizontal)
+
+            LazyVStack(spacing: 12) {
+                ForEach(tasks) { task in
+                    Button {
+                        onSelect(task)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(alignment: .firstTextBaseline) {
+                                Text(taskTitle(for: task))
+                                    .font(.subheadline.weight(.semibold))
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Text(viewModel.reviewSubtitle(for: task))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+
+                            ForEach(task.targets) { target in
+                                Text(viewModel.reviewPrompt(for: target))
+                                    .font(.footnote)
+                                    .foregroundStyle(.primary)
+                            }
+
+                            if task.targets.count > 1 {
+                                Text("Rate both the studio and engineer together.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Button("Hide reminder", role: .destructive) {
+                                onHide(task)
+                            }
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .buttonStyle(.borderless)
+                            .padding(.top, 4)
+                        }
+                        .padding(16)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .fill(Color(uiColor: .secondarySystemGroupedBackground))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal)
+        }
+        .padding(.bottom, 4)
+    }
+
+    private func taskTitle(for task: BookingInboxViewModel.ReviewTask) -> String {
+        if task.targets.count > 1 {
+            return viewModel.studioName(for: task.booking.studioId)
+        }
+        if let target = task.targets.first {
+            return viewModel.revieweeName(for: target)
+        }
+        return "Review"
+    }
+}
+
 private struct BookingListView: View {
     @EnvironmentObject private var viewModel: BookingInboxViewModel
 
@@ -172,6 +277,17 @@ private struct BookingListView: View {
     let allowPendingActions: Bool
     let onReschedule: (Booking) -> Void
     let onCancel: (Booking) -> Void
+    let onSelect: (Booking) -> Void
+
+    private var filteredPending: [Booking] {
+        guard viewModel.hideCancelled else { return pending }
+        return pending.filter { $0.status != .cancelled }
+    }
+
+    private var filteredScheduled: [Booking] {
+        guard viewModel.hideCancelled else { return scheduled }
+        return scheduled.filter { $0.status != .cancelled }
+    }
 
     var body: some View {
         List {
@@ -183,33 +299,37 @@ private struct BookingListView: View {
                 }
             }
 
-            if !pending.isEmpty {
+            if filteredPending.isEmpty == false {
                 Section(title) {
-                    ForEach(pending) { booking in
+                    ForEach(filteredPending) { booking in
                         BookingRow(
                             booking: booking,
                             showActions: allowPendingActions && viewModel.canAct(on: booking),
                             onReschedule: onReschedule,
                             onCancel: onCancel
                         )
+                        .contentShape(Rectangle())
+                        .onTapGesture { onSelect(booking) }
                     }
                 }
             }
 
-            if !scheduled.isEmpty {
+            if filteredScheduled.isEmpty == false {
                 Section(subtitle) {
-                    ForEach(scheduled) { booking in
+                    ForEach(filteredScheduled) { booking in
                         BookingRow(
                             booking: booking,
                             showActions: false,
                             onReschedule: onReschedule,
                             onCancel: onCancel
                         )
+                        .contentShape(Rectangle())
+                        .onTapGesture { onSelect(booking) }
                     }
                 }
             }
 
-            if pending.isEmpty && scheduled.isEmpty {
+            if filteredPending.isEmpty && filteredScheduled.isEmpty {
                 ContentUnavailableView(
                     "Nothing to review",
                     systemImage: "calendar.badge.checkmark",
@@ -231,6 +351,7 @@ private struct BookingCalendarView: View {
     let allowPendingActions: Bool
     let onReschedule: (Booking) -> Void
     let onCancel: (Booking) -> Void
+    let onSelect: (Booking) -> Void
 
     var body: some View {
         ScrollView {
@@ -287,6 +408,8 @@ private struct BookingCalendarView: View {
                                             .fill(Color(uiColor: .secondarySystemGroupedBackground))
                                     )
                                     .padding(.horizontal, 4)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture { onSelect(booking) }
                                 }
                             }
                         }
@@ -493,6 +616,442 @@ private struct EngineerScheduleRow: View {
         let start = booking.requestedStart
         let end = booking.requestedEnd
         return "\(formatter.string(from: start)) – \(formatter.string(from: end))"
+    }
+}
+
+private struct BookingDetailSheet: View {
+    @EnvironmentObject private var viewModel: BookingInboxViewModel
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.di) private var di
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var localBooking: Booking
+    @State private var isLoadingChat = false
+    @State private var chatThread: ChatThread?
+    @State private var errorMessage: String?
+
+    init(booking: Booking) {
+        _localBooking = State(initialValue: booking)
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    sessionCard
+                    locationCard
+                    participantsCard
+                    notesCard
+                    messageCard
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 24)
+                .padding(.bottom, 32)
+            }
+            .background(Color(uiColor: .systemGroupedBackground))
+            .navigationTitle("Session details")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .sheet(item: $chatThread) { thread in
+            NavigationStack {
+                ChatDetailView(
+                    viewModel: ChatDetailViewModel(
+                        thread: thread,
+                        chatService: di.chatService,
+                        appState: appState
+                    )
+                )
+            }
+        }
+        .alert(errorMessage ?? "", isPresented: Binding(
+            get: { errorMessage != nil },
+            set: { if !$0 { errorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) { errorMessage = nil }
+        }
+    }
+
+    private var sessionCard: some View {
+        detailCard(title: "Session") {
+            VStack(alignment: .leading, spacing: 8) {
+                Label(dateRangeText, systemImage: "calendar")
+                Label(durationText, systemImage: "clock")
+
+                HStack(spacing: 8) {
+                    Image(systemName: statusDescriptor.icon)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(statusDescriptor.color)
+                    Text(statusDescriptor.title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(statusDescriptor.color)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(statusDescriptor.color.opacity(0.16), in: Capsule())
+
+                if let pricingText {
+                    Label(pricingText, systemImage: "creditcard")
+                }
+
+                if localBooking.instantBook {
+                    Label("Instantly confirmed", systemImage: "bolt.fill")
+                        .foregroundStyle(Color.green)
+                }
+            }
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private var locationCard: some View {
+        detailCard(title: "Location") {
+            if let studio = viewModel.studio(for: localBooking.studioId) {
+                Label(studio.name, systemImage: "building.2")
+                    .font(.subheadline.weight(.semibold))
+                if let addressLine = addressLine(for: studio), addressLine.isEmpty == false {
+                    Label(addressLine, systemImage: "mappin.and.ellipse")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Label(viewModel.studioName(for: localBooking.studioId), systemImage: "building.2")
+                    .font(.subheadline.weight(.semibold))
+                Text("Studio details unavailable")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var participantsCard: some View {
+        detailCard(title: "Participants") {
+            VStack(alignment: .leading, spacing: 14) {
+                participantRow(
+                    icon: "person",
+                    role: "Artist",
+                    name: viewModel.displayName(forUser: localBooking.artistId),
+                    contact: viewModel.userProfile(for: localBooking.artistId)?.contact
+                )
+
+                participantRow(
+                    icon: "person.crop.rectangle",
+                    role: "Engineer",
+                    name: viewModel.displayName(forUser: localBooking.engineerId),
+                    contact: viewModel.userProfile(for: localBooking.engineerId)?.contact
+                )
+
+                if let studio = viewModel.studio(for: localBooking.studioId) {
+                    let ownerName = viewModel.displayName(forUser: studio.ownerId)
+                    participantRow(
+                        icon: "building",
+                        role: "Studio",
+                        name: studio.name,
+                        subtitle: ownerName == studio.name ? nil : "Owner: \(ownerName)",
+                        contact: viewModel.userProfile(for: studio.ownerId)?.contact
+                    )
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var notesCard: some View {
+        if localBooking.notes.isEmpty == false {
+            detailCard(title: "Notes") {
+                Text(localBooking.notes)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    private var messageCard: some View {
+        detailCard(title: "Coordinate") {
+            VStack(alignment: .leading, spacing: 12) {
+                Button {
+                    Task { await openChat() }
+                } label: {
+                    if isLoadingChat {
+                        HStack {
+                            ProgressView()
+                            Text("Opening chat…")
+                        }
+                        .frame(maxWidth: .infinity)
+                    } else {
+                        Label("Message studio & engineer", systemImage: "message")
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isLoadingChat)
+
+                Text("Start a conversation to finalize logistics with everyone involved.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
+                if let conversationId = localBooking.conversationId {
+                    Label {
+                        Text("Linked chat ID: \(conversationId)")
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    } icon: {
+                        Image(systemName: "link")
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private func detailCard<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title)
+                .font(.headline)
+            content()
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(Color(uiColor: .secondarySystemGroupedBackground))
+        )
+    }
+
+    private func participantRow(
+        icon: String,
+        role: String,
+        name: String,
+        subtitle: String? = nil,
+        contact: UserContactInfo? = nil
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .center, spacing: 10) {
+                Image(systemName: icon)
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(role)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(name)
+                        .font(.subheadline.weight(.semibold))
+                }
+            }
+
+            if let subtitle, subtitle.isEmpty == false {
+                Text(subtitle)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, 26)
+            }
+
+            if let contact {
+                if contact.email.isEmpty == false {
+                    Label(contact.email, systemImage: "envelope")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 26)
+                }
+                if contact.phoneNumber.isEmpty == false {
+                    Label(contact.phoneNumber, systemImage: "phone")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 26)
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func openChat() async {
+        guard isLoadingChat == false else { return }
+        guard let currentUser = appState.currentUser else {
+            errorMessage = "Sign in to message participants."
+            return
+        }
+
+        isLoadingChat = true
+        defer { isLoadingChat = false }
+
+        do {
+            let thread: ChatThread
+            if let existingId = localBooking.conversationId {
+                thread = try await di.chatService.thread(withId: existingId)
+            } else {
+                let participants = try buildChatParticipants(excluding: currentUser.id)
+                guard participants.isEmpty == false else {
+                    throw BookingDetailError.missingParticipants
+                }
+
+                let creator = ChatParticipant(user: currentUser)
+                let kind: ChatThread.Kind = participants.count > 1 ? .group : .direct
+                let settings = kind == .group
+                    ? ChatThread.GroupSettings(
+                        name: "\(viewModel.studioName(for: localBooking.studioId)) Session",
+                        photo: nil,
+                        allowsParticipantEditing: true
+                    )
+                    : nil
+
+                thread = try await di.chatService.createThread(
+                    creator: creator,
+                    participants: participants,
+                    kind: kind,
+                    groupSettings: settings
+                )
+
+                localBooking.conversationId = thread.id
+                let bookingSnapshot = localBooking
+                Task {
+                    await viewModel.attachConversation(thread.id, to: bookingSnapshot)
+                }
+            }
+
+            chatThread = thread
+        } catch {
+            if let bookingError = error as? BookingDetailError {
+                self.errorMessage = bookingError.errorDescription ?? "Unable to start the chat."
+            } else {
+                self.errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func buildChatParticipants(excluding currentUserId: String) throws -> [ChatParticipant] {
+        guard let studio = viewModel.studio(for: localBooking.studioId) else {
+            throw BookingDetailError.missingStudio
+        }
+
+        var participants: [ChatParticipant] = [ChatParticipant(studio: studio)]
+
+        if localBooking.engineerId != currentUserId {
+            guard let engineer = viewModel.userProfile(for: localBooking.engineerId) else {
+                throw BookingDetailError.missingEngineer
+            }
+            participants.append(ChatParticipant(user: engineer))
+        }
+
+        if localBooking.artistId != currentUserId {
+            guard let artist = viewModel.userProfile(for: localBooking.artistId) else {
+                throw BookingDetailError.missingArtist
+            }
+            participants.append(ChatParticipant(user: artist))
+        }
+
+        var unique: [String: ChatParticipant] = [:]
+        for participant in participants where participant.id != currentUserId {
+            unique[participant.id] = participant
+        }
+        return Array(unique.values)
+    }
+
+    private func addressLine(for studio: Studio) -> String? {
+        switch (studio.address.isEmpty, studio.city.isEmpty) {
+        case (true, true):
+            return nil
+        case (false, true):
+            return studio.address
+        case (true, false):
+            return studio.city
+        case (false, false):
+            return "\(studio.address), \(studio.city)"
+        }
+    }
+
+    private var dateRangeText: String {
+        Self.dateIntervalFormatter.string(from: localBooking.requestedStart, to: localBooking.requestedEnd)
+    }
+
+    private var durationText: String {
+        if let formatted = Self.durationFormatter.string(from: TimeInterval(localBooking.durationMinutes * 60)) {
+            return formatted
+        }
+        return "\(localBooking.durationMinutes) minutes"
+    }
+
+    private var pricingText: String? {
+        guard let pricing = localBooking.pricing else { return nil }
+        if let formatted = Self.currencyFormatter(currencyCode: pricing.currency).string(from: NSNumber(value: pricing.total)) {
+            return "Total: \(formatted)"
+        }
+        return "Total: \(pricing.currency) \(pricing.total)"
+    }
+
+    private var statusDescriptor: (title: String, color: Color, icon: String) {
+        if localBooking.status == .pending {
+            switch (localBooking.approval.requiresStudioApproval, localBooking.approval.requiresEngineerApproval) {
+            case (true, true):
+                return ("Pending approval", .orange, "hourglass")
+            case (true, false):
+                return ("Awaiting studio", .orange, "building.2")
+            case (false, true):
+                return ("Awaiting engineer", .orange, "person.crop.rectangle")
+            case (false, false):
+                return ("Pending", .orange, "hourglass")
+            }
+        }
+
+        switch localBooking.status {
+        case .confirmed:
+            return ("Confirmed", .green, "checkmark")
+        case .completed:
+            return ("Completed", .blue, "checkmark.seal")
+        case .cancelled:
+            return ("Cancelled", .red, "xmark")
+        case .rescheduled:
+            return ("Rescheduled", .purple, "arrow.uturn.right")
+        case .pending:
+            return ("Pending", .orange, "hourglass")
+        }
+    }
+
+    private static let dateIntervalFormatter: DateIntervalFormatter = {
+        let formatter = DateIntervalFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
+
+    private static let durationFormatter: DateComponentsFormatter = {
+        let formatter = DateComponentsFormatter()
+        formatter.allowedUnits = [.hour, .minute]
+        formatter.unitsStyle = .full
+        formatter.zeroFormattingBehavior = [.dropLeading]
+        return formatter
+    }()
+
+    private static func currencyFormatter(currencyCode: String) -> NumberFormatter {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .currency
+        formatter.currencyCode = currencyCode
+        formatter.maximumFractionDigits = 2
+        return formatter
+    }
+}
+
+private enum BookingDetailError: LocalizedError {
+    case missingStudio
+    case missingEngineer
+    case missingArtist
+    case missingParticipants
+
+    var errorDescription: String? {
+        switch self {
+        case .missingStudio:
+            return "Studio details are missing. Try refreshing your bookings."
+        case .missingEngineer:
+            return "We couldn't load the engineer's profile. Refresh and try again."
+        case .missingArtist:
+            return "We couldn't load the artist profile for this session. Refresh and try again."
+        case .missingParticipants:
+            return "We need at least one other participant to start a chat."
+        }
     }
 }
 
@@ -726,6 +1285,122 @@ private struct RescheduleBookingSheet: View {
         let startString = formatter.string(from: startDate)
         let endString = formatter.string(from: endDate)
         return "Session will run from \(startString) to \(endString)."
+    }
+}
+
+private struct ReviewComposerSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var viewModel: BookingInboxViewModel
+
+    let task: BookingInboxViewModel.ReviewTask
+    let onSubmit: ([BookingInboxViewModel.ReviewTarget: BookingInboxViewModel.ReviewResponse]) -> Void
+
+    @State private var ratings: [String: Int]
+    @State private var comments: [String: String]
+
+    init(task: BookingInboxViewModel.ReviewTask, onSubmit: @escaping ([BookingInboxViewModel.ReviewTarget: BookingInboxViewModel.ReviewResponse]) -> Void) {
+        self.task = task
+        self.onSubmit = onSubmit
+        var initialRatings: [String: Int] = [:]
+        for target in task.targets {
+            initialRatings[target.id] = 5
+        }
+        _ratings = State(initialValue: initialRatings)
+        _comments = State(initialValue: [:])
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section(viewModel.reviewTitle(for: task)) {
+                    Text(viewModel.reviewSubtitle(for: task))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if task.targets.count > 1 {
+                        Text("Rate the studio and engineer from this session.")
+                            .font(.footnote)
+                    }
+                }
+
+                ForEach(task.targets) { target in
+                    Section(header: Text(viewModel.revieweeName(for: target))) {
+                        Text(viewModel.reviewPrompt(for: target))
+                            .font(.footnote)
+
+                        ratingRow(for: target)
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Comments (optional)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            TextEditor(text: Binding(
+                                get: { comments[target.id] ?? "" },
+                                set: { comments[target.id] = $0 }
+                            ))
+                            .frame(minHeight: 100)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12)
+                                    .stroke(Color(uiColor: .separator), lineWidth: 1 / UIScreen.main.scale)
+                            )
+                        }
+                        .padding(.top, 6)
+                    }
+                }
+
+                if viewModel.isSubmittingReview(for: task) {
+                    Section {
+                        HStack {
+                            ProgressView()
+                            Text("Submitting…")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Leave a review")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Submit") {
+                        onSubmit(buildResponses())
+                        dismiss()
+                    }
+                    .disabled(viewModel.isSubmittingReview(for: task))
+                }
+            }
+        }
+    }
+
+    private func ratingRow(for target: BookingInboxViewModel.ReviewTarget) -> some View {
+        HStack(spacing: 6) {
+            ForEach(1...5, id: \.self) { value in
+                Image(systemName: value <= (ratings[target.id] ?? 5) ? "star.fill" : "star")
+                    .font(.title3)
+                    .foregroundStyle(value <= (ratings[target.id] ?? 5) ? Color.yellow : Color.secondary)
+                    .onTapGesture {
+                        ratings[target.id] = value
+                    }
+            }
+            Spacer()
+            Text("\(ratings[target.id] ?? 5)/5")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 6)
+    }
+
+    private func buildResponses() -> [BookingInboxViewModel.ReviewTarget: BookingInboxViewModel.ReviewResponse] {
+        var responses: [BookingInboxViewModel.ReviewTarget: BookingInboxViewModel.ReviewResponse] = [:]
+        for target in task.targets {
+            let rating = ratings[target.id] ?? 5
+            let comment = comments[target.id] ?? ""
+            responses[target] = BookingInboxViewModel.ReviewResponse(rating: rating, comment: comment)
+        }
+        return responses
     }
 }
 

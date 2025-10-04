@@ -21,6 +21,9 @@ struct StudioDetailView: View {
     @State private var todaysAvailability: [RoomAvailabilityLine] = []
     @State private var availabilityMessage: String?
     @State private var isLoadingAvailability = false
+    @State private var reviews: [Review] = []
+    @State private var isLoadingReviews = false
+    @State private var reviewsErrorMessage: String?
 
     var body: some View {
         ScrollView {
@@ -28,6 +31,7 @@ struct StudioDetailView: View {
                 heroHeader
                 quickStatsCard
                 todaysHoursCard
+                reviewsSection
                 if canCurrentUserBook {
                     PrimaryButton(title: "Book this studio") {
                         isBookingPresented = true
@@ -49,6 +53,7 @@ struct StudioDetailView: View {
             observedApprovedEngineerIds = studio.approvedEngineerIds
             await loadAcceptedEngineersIfNeeded(force: false)
             await loadTodayAvailability()
+            await loadReviews()
         }
         .onChange(of: studio.approvedEngineerIds) { ids in
             updateEngineerStatusCache(with: ids)
@@ -318,6 +323,117 @@ struct StudioDetailView: View {
         }
     }
 
+    private var reviewsSection: some View {
+        VStack(alignment: .leading, spacing: Theme.spacingSmall) {
+            Label("Reviews", systemImage: "star.circle.fill")
+                .font(.headline)
+
+            if isLoadingReviews {
+                ProgressView()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else if let message = reviewsErrorMessage {
+                Text(message)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            } else if reviews.isEmpty {
+                Text("No reviews yet. Be the first to share your experience.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else {
+                ratingSummary
+                Divider()
+                let featuredReviews = topReviews
+                ForEach(Array(featuredReviews.enumerated()), id: \.element.id) { entry in
+                    let review = entry.element
+                    let index = entry.offset
+                    reviewRow(for: review)
+                    if index < featuredReviews.count - 1 {
+                        Divider()
+                    }
+                }
+            }
+        }
+    }
+
+    private var ratingSummary: some View {
+        HStack(alignment: .center, spacing: 12) {
+            HStack(spacing: 4) {
+                Image(systemName: "star.fill")
+                    .foregroundStyle(Color.yellow)
+                Text(averageRatingText)
+                    .font(.title3.weight(.semibold))
+            }
+
+            Text("\(reviews.count) review\(reviews.count == 1 ? "" : "s")")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var averageRatingText: String {
+        guard let averageRating else { return "–" }
+        return String(format: "%.1f", averageRating)
+    }
+
+    private var averageRating: Double? {
+        guard reviews.isEmpty == false else { return nil }
+        let total = reviews.reduce(0.0) { $0 + Double($1.rating) }
+        return total / Double(reviews.count)
+    }
+
+    private var topReviews: [Review] {
+        Array(sortedReviews.prefix(3))
+    }
+
+    private var sortedReviews: [Review] {
+        reviews.sorted { $0.createdAt > $1.createdAt }
+    }
+
+    private func reviewRow(for review: Review) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                starRow(rating: review.rating)
+                Text(review.reviewerAccountType.title)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text(formattedReviewDate(review.createdAt))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if review.comment.trimmed.isEmpty == false {
+                Text(review.comment)
+                    .font(.footnote)
+            } else {
+                Text("No written feedback provided.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func starRow(rating: Int) -> some View {
+        HStack(spacing: 2) {
+            ForEach(1...5, id: \.self) { value in
+                Image(systemName: value <= rating ? "star.fill" : "star")
+                    .font(.caption)
+                    .foregroundStyle(value <= rating ? Color.yellow : Color.secondary)
+            }
+        }
+    }
+
+    private func formattedReviewDate(_ date: Date) -> String {
+        Self.reviewDateFormatter.string(from: date)
+    }
+
+    private static let reviewDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .none
+        return formatter
+    }()
+
     private var amenitiesSection: some View {
         Group {
             if !studio.amenities.isEmpty {
@@ -427,6 +543,20 @@ struct StudioDetailView: View {
         }
 
         isLoadingOwner = false
+    }
+
+    private func loadReviews() async {
+        guard isLoadingReviews == false else { return }
+        isLoadingReviews = true
+        reviewsErrorMessage = nil
+
+        do {
+            reviews = try await di.reviewService.fetchReviews(for: studio.id, kind: .studio)
+        } catch {
+            reviewsErrorMessage = error.localizedDescription
+        }
+
+        isLoadingReviews = false
     }
 
     private func loadEngineerRequestIfNeeded() async {

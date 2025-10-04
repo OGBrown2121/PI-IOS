@@ -61,6 +61,7 @@ protocol BookingService {
     func submit(request: BookingRequestInput) async throws -> Booking
     func fetchBookings(for participantId: String, role: BookingParticipantRole) async throws -> [Booking]
     func updateBooking(_ booking: Booking) async throws
+    func validateReschedule(for booking: Booking, newStart: Date, durationMinutes: Int) async throws
 }
 
 struct DefaultBookingService: BookingService {
@@ -162,6 +163,46 @@ struct DefaultBookingService: BookingService {
 
     func updateBooking(_ booking: Booking) async throws {
         try await firestore.updateBooking(booking)
+    }
+
+    func validateReschedule(for booking: Booking, newStart: Date, durationMinutes: Int) async throws {
+        try validateDuration(durationMinutes)
+
+        let endDate = newStart.addingTimeInterval(TimeInterval(durationMinutes * 60))
+        let studios = try await firestore.fetchStudios()
+        guard let studio = studios.first(where: { $0.id == booking.studioId }) else {
+            throw BookingFlowError.roomUnavailable
+        }
+
+        let schedule = studio.operatingSchedule
+        let calendar = calendar(for: schedule.timeZoneIdentifier)
+        let timezone = TimeZone(identifier: schedule.timeZoneIdentifier) ?? calendar.timeZone
+
+        guard isWithinOperatingHours(start: newStart, end: endDate, schedule: schedule, calendar: calendar) else {
+            throw BookingFlowError.studioClosed
+        }
+
+        guard isOutsideBlackoutDates(date: newStart, schedule: schedule, calendar: calendar) else {
+            throw BookingFlowError.studioBlackout
+        }
+
+        async let availabilityTask = firestore.fetchAvailability(scope: .engineer, ownerId: booking.engineerId)
+        async let engineerBookingsTask = fetchBookings(for: booking.engineerId, role: .engineer)
+
+        let availabilityEntries = try await availabilityTask
+        let engineerBookings = (try await engineerBookingsTask).filter { $0.id != booking.id }
+
+        let blockingEntries = availabilityEntries
+            .filter { $0.sourceBookingId != booking.id }
+            .filter(isBlocking)
+
+        guard isConflictFree(entries: blockingEntries, start: newStart, end: endDate, timezone: timezone) else {
+            throw BookingFlowError.engineerUnavailable
+        }
+
+        guard conflicts(with: engineerBookings, studioId: booking.studioId, roomId: booking.roomId, engineerId: booking.engineerId, start: newStart, end: endDate) == false else {
+            throw BookingFlowError.engineerUnavailable
+        }
     }
 }
 

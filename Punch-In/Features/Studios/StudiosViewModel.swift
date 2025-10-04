@@ -112,14 +112,22 @@ final class StudiosViewModel: ObservableObject {
         var resolvedLogoURL = existingLogoURL
 
         if removeCoverImage {
-            await deleteFileIfExists(path: "studios/\(studioIdentifier)/cover.jpg")
+            await deleteStudioAssetFiles(ownerId: ownerId, studioIdentifier: studioIdentifier, kind: .cover)
             resolvedCoverURL = nil
         } else if let coverImageData {
             do {
+                let coverFileName = storageFileName(for: .cover, contentType: coverImageContentType)
                 resolvedCoverURL = try await storageService.uploadImage(
                     data: coverImageData,
-                    path: "studios/\(studioIdentifier)/cover.jpg",
+                    path: "users/\(ownerId)/studios/\(studioIdentifier)/\(coverFileName)",
                     contentType: coverImageContentType
+                )
+                await cleanUpLegacyAssetFiles(
+                    ownerId: ownerId,
+                    studioIdentifier: studioIdentifier,
+                    existingURL: existingCoverURL,
+                    newFileName: coverFileName,
+                    kind: .cover
                 )
             } catch {
                 return error.localizedDescription
@@ -127,14 +135,22 @@ final class StudiosViewModel: ObservableObject {
         }
 
         if removeLogoImage {
-            await deleteFileIfExists(path: "studios/\(studioIdentifier)/logo.jpg")
+            await deleteStudioAssetFiles(ownerId: ownerId, studioIdentifier: studioIdentifier, kind: .logo)
             resolvedLogoURL = nil
         } else if let logoImageData {
             do {
+                let logoFileName = storageFileName(for: .logo, contentType: logoImageContentType)
                 resolvedLogoURL = try await storageService.uploadImage(
                     data: logoImageData,
-                    path: "studios/\(studioIdentifier)/logo.jpg",
+                    path: "users/\(ownerId)/studios/\(studioIdentifier)/\(logoFileName)",
                     contentType: logoImageContentType
+                )
+                await cleanUpLegacyAssetFiles(
+                    ownerId: ownerId,
+                    studioIdentifier: studioIdentifier,
+                    existingURL: existingLogoURL,
+                    newFileName: logoFileName,
+                    kind: .logo
                 )
             } catch {
                 return error.localizedDescription
@@ -172,6 +188,56 @@ final class StudiosViewModel: ObservableObject {
                StorageErrorCode(rawValue: storageError.code) == .objectNotFound {
                 return
             }
+        }
+    }
+
+    private func storageFileName(for kind: StudioAssetKind, contentType: String) -> String {
+        let lowercased = contentType.lowercased()
+        if lowercased.contains("png") {
+            return "\(kind.rawValue).png"
+        }
+        if lowercased.contains("jpeg") || lowercased.contains("jpg") {
+            return "\(kind.rawValue).jpg"
+        }
+        return "\(kind.rawValue).jpg"
+    }
+
+    private func deleteStudioAssetFiles(ownerId: String, studioIdentifier: String, kind: StudioAssetKind) async {
+        for fileName in kind.supportedFileNames {
+            await deleteFileIfExists(path: "users/\(ownerId)/studios/\(studioIdentifier)/\(fileName)")
+        }
+    }
+
+    private func cleanUpLegacyAssetFiles(
+        ownerId: String,
+        studioIdentifier: String,
+        existingURL: URL?,
+        newFileName: String,
+        kind: StudioAssetKind
+    ) async {
+        guard let existingFileName = existingURL?.lastPathComponent,
+              existingFileName != newFileName else { return }
+
+        // Remove the previously stored file if its extension differs from the new upload.
+        await deleteFileIfExists(path: "users/\(ownerId)/studios/\(studioIdentifier)/\(existingFileName)")
+
+        // Ensure we don't leave behind any other legacy variants beyond the current upload.
+        for candidate in kind.supportedFileNames where candidate != newFileName && candidate != existingFileName {
+            await deleteFileIfExists(path: "users/\(ownerId)/studios/\(studioIdentifier)/\(candidate)")
+        }
+    }
+}
+
+private enum StudioAssetKind: String {
+    case cover
+    case logo
+
+    var supportedFileNames: [String] {
+        switch self {
+        case .cover:
+            return ["cover.jpg", "cover.jpeg", "cover.png"]
+        case .logo:
+            return ["logo.jpg", "logo.jpeg", "logo.png"]
         }
     }
 }

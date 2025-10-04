@@ -287,6 +287,15 @@ private struct GroupSettingsSheet: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section(header: Text("Participants")) {
+                    ForEach(viewModel.thread.participants) { participant in
+                        ParticipantRow(
+                            participant: participant,
+                            isCurrentUser: participant.id == viewModel.currentUserParticipant?.id
+                        )
+                    }
+                }
+
                 Section(header: Text("Group name")) {
                     TextField("Group name", text: $name)
                         .disabled(!viewModel.canEditGroupSettings)
@@ -416,6 +425,45 @@ private struct GroupPhotoPreview: View {
                 Image(systemName: "photo")
                     .foregroundStyle(Theme.primaryColor)
             )
+    }
+}
+
+private struct ParticipantRow: View {
+    let participant: ChatParticipant
+    let isCurrentUser: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: iconName)
+                .foregroundStyle(.secondary)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(displayName)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+
+                if let subtitle = participant.secondaryText, subtitle.isEmpty == false {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 4)
+    }
+
+    private var displayName: String {
+        isCurrentUser ? "You" : participant.displayName
+    }
+
+    private var iconName: String {
+        switch participant.kind {
+        case .user:
+            return "person"
+        case .studio:
+            return "building.2"
+        }
     }
 }
 

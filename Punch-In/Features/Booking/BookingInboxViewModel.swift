@@ -45,32 +45,46 @@ final class BookingInboxViewModel: ObservableObject {
         }
     }
     @Published private(set) var calendarBookings: [Booking] = []
+    @Published private(set) var pendingReviews: [ReviewTask] = []
     @Published private var actionInFlight: Set<String> = []
+    @Published private var reviewActionInFlight: Set<String> = []
     @Published private var userNames: [String: String] = [:]
     @Published private var studioNames: [String: String] = [:]
+    @Published private var studioDetails: [String: Studio] = [:]
     @Published private var roomNames: [String: String] = [:]
     @Published private var userProfiles: [String: UserProfile] = [:]
     @Published private(set) var engineerProfiles: [String: UserProfile] = [:]
 
     private let bookingService: any BookingService
     private let firestore: any FirestoreService
+    private let reviewService: any ReviewService
     private let currentUserProvider: () -> UserProfile?
     private let calendar: Calendar
-    private var fetchedRoomsForStudios: Set<String> = []
     private let rescheduleDurationOptions: [Int] = [30, 60, 90, 120, 180, 240]
     private var ownedStudioEngineerIds: Set<String> = []
+    private var authoredReviews: [String: Review] = [:]
+    private var cachedBookings: [Booking] = []
+    private var dismissedReviewTaskIds: Set<String>
+    private static let dismissedReviewStorageKey = "booking_review_dismissed_ids"
 
     init(
         bookingService: any BookingService,
         firestoreService: any FirestoreService,
+        reviewService: any ReviewService,
         currentUserProvider: @escaping () -> UserProfile?
     ) {
         self.bookingService = bookingService
         self.firestore = firestoreService
+        self.reviewService = reviewService
         self.currentUserProvider = currentUserProvider
         let calendar = Calendar.current
         self.calendar = calendar
         self.selectedCalendarDate = calendar.startOfDay(for: Date())
+        if let stored = UserDefaults.standard.array(forKey: Self.dismissedReviewStorageKey) as? [String] {
+            dismissedReviewTaskIds = Set(stored)
+        } else {
+            dismissedReviewTaskIds = []
+        }
     }
 
     func load() async {
@@ -89,6 +103,8 @@ final class BookingInboxViewModel: ObservableObject {
             pendingApprovals = []
             scheduledBookings = []
             calendarBookings = []
+            pendingReviews = []
+            cachedBookings = []
             return
         }
 
@@ -107,6 +123,8 @@ final class BookingInboxViewModel: ObservableObject {
             scheduledBookings = []
             calendarBookings = []
             engineerProfiles = [:]
+            pendingReviews = []
+            cachedBookings = []
         }
     }
 
@@ -176,6 +194,13 @@ final class BookingInboxViewModel: ObservableObject {
 
     func reschedule(_ booking: Booking, to newStart: Date, durationMinutes: Int) async {
         guard canReschedule(booking) else { return }
+        do {
+            try await bookingService.validateReschedule(for: booking, newStart: newStart, durationMinutes: durationMinutes)
+        } catch {
+            errorMessage = error.localizedDescription
+            return
+        }
+
         await performMutation(on: booking) { booking in
             var updated = booking
             let clampedDuration = durationMinutes
@@ -329,30 +354,39 @@ final class BookingInboxViewModel: ObservableObject {
                     && booking.requestedEnd > Date()
                     && pendingIds.contains(booking.id) == false
             }
+            cachedBookings = sorted
             await resolveMetadata(for: sorted)
             updateCalendarData(with: sorted)
             pendingApprovals = pending
             scheduledBookings = upcoming
+            await rebuildPendingReviews(with: sorted, for: user, role: .engineer)
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
             pendingApprovals = []
             scheduledBookings = []
+            pendingReviews = []
+            cachedBookings = []
         }
     }
 
     private func loadArtistBookings(for user: UserProfile) async {
         do {
             let bookings = try await bookingService.fetchBookings(for: user.id, role: .artist)
-            scheduledBookings = bookings.sorted { $0.requestedStart < $1.requestedStart }
-            await resolveMetadata(for: bookings)
-            updateCalendarData(with: scheduledBookings)
+            let sorted = bookings.sorted { $0.requestedStart < $1.requestedStart }
+            cachedBookings = sorted
+            scheduledBookings = sorted
+            await resolveMetadata(for: sorted)
+            updateCalendarData(with: sorted)
             pendingApprovals = []
+            await rebuildPendingReviews(with: sorted, for: user, role: .artist)
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
             scheduledBookings = []
             pendingApprovals = []
+            pendingReviews = []
+            cachedBookings = []
         }
     }
 
@@ -376,6 +410,7 @@ final class BookingInboxViewModel: ObservableObject {
             ownedStudioEngineerIds = []
             for studio in ownedStudios {
                 studioNames[studio.id] = studio.name
+                studioDetails[studio.id] = studio
                 let bookings = try await bookingService.fetchBookings(for: studio.id, role: .studio)
                 allBookings.append(contentsOf: bookings)
                 ownedStudioEngineerIds.formUnion(studio.approvedEngineerIds)
@@ -390,17 +425,21 @@ final class BookingInboxViewModel: ObservableObject {
                     && pendingIds.contains(booking.id) == false
             }
 
+            cachedBookings = sorted
             await resolveMetadata(for: sorted, ownedStudios: ownedStudios)
             await loadEngineerProfilesIfNeeded(for: ownedStudios)
             updateCalendarData(with: sorted)
 
             pendingApprovals = pending
             scheduledBookings = upcoming
+            await rebuildPendingReviews(with: sorted, for: user, role: .studioOwner)
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
             pendingApprovals = []
             scheduledBookings = []
+            pendingReviews = []
+            cachedBookings = []
         }
     }
 
@@ -460,6 +499,7 @@ final class BookingInboxViewModel: ObservableObject {
 
         for studio in ownedStudios {
             studioNames[studio.id] = studio.name
+            studioDetails[studio.id] = studio
         }
 
         let userIds = Set(bookings.flatMap { [$0.artistId, $0.engineerId] })
@@ -484,23 +524,19 @@ final class BookingInboxViewModel: ObservableObject {
                 let studios = try await firestore.fetchStudios()
                 for studio in studios where missingStudios.contains(studio.id) {
                     studioNames[studio.id] = studio.name
+                    studioDetails[studio.id] = studio
                 }
             } catch {
                 errorMessage = error.localizedDescription
             }
         }
 
-        let roomIds = Set(bookings.map { $0.roomId })
-        let missingRoomIds = roomIds.filter { roomNames[$0] == nil }
-        let studiosNeedingRooms = Set(bookings
-            .filter { missingRoomIds.contains($0.roomId) }
-            .map { $0.studioId })
+        let missingRoomsByStudio = Dictionary(grouping: bookings.filter { roomNames[$0.roomId] == nil }) { $0.studioId }
 
-        for studioId in studiosNeedingRooms where fetchedRoomsForStudios.contains(studioId) == false {
-            fetchedRoomsForStudios.insert(studioId)
+        for (studioId, _) in missingRoomsByStudio {
             do {
                 let rooms = try await firestore.fetchRooms(for: studioId)
-                for room in rooms where missingRoomIds.contains(room.id) {
+                for room in rooms {
                     roomNames[room.id] = room.name
                 }
             } catch {
@@ -508,6 +544,205 @@ final class BookingInboxViewModel: ObservableObject {
             }
         }
     }
+
+    private func rebuildPendingReviews(with bookings: [Booking], for user: UserProfile, role: ViewerRole) async {
+        guard bookings.contains(where: { $0.status == .completed }) else {
+            pendingReviews = []
+            return
+        }
+
+        await loadAuthoredReviews(for: user)
+        pendingReviews = buildReviewTasks(from: bookings, role: role)
+    }
+
+    private func loadAuthoredReviews(for user: UserProfile) async {
+        do {
+            let reviews = try await reviewService.fetchReviewsAuthored(by: user.id)
+            authoredReviews = Dictionary(uniqueKeysWithValues: reviews.map { review in
+                (reviewKey(bookingId: review.bookingId, revieweeId: review.revieweeId, kind: review.revieweeKind), review)
+            })
+        } catch {
+            #if DEBUG
+            print("[BookingInbox] failed to fetch reviews for user=\(user.id) error=\(error)")
+            #endif
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func buildReviewTasks(from bookings: [Booking], role: ViewerRole) -> [ReviewTask] {
+        guard bookings.isEmpty == false else { return [] }
+
+        var tasks: [ReviewTask] = []
+
+        for booking in bookings where booking.status == .completed {
+            let pendingTargets = pendingReviewTargets(for: booking, role: role)
+            if pendingTargets.isEmpty == false {
+                tasks.append(ReviewTask(
+                    id: "\(booking.id)|reviews",
+                    booking: booking,
+                    targets: pendingTargets,
+                    sessionDate: sessionDate(for: booking)
+                ))
+            }
+        }
+
+        let activeIds = Set(tasks.map { $0.id })
+        let prunedDismissed = dismissedReviewTaskIds.intersection(activeIds)
+        if prunedDismissed != dismissedReviewTaskIds {
+            dismissedReviewTaskIds = prunedDismissed
+            persistDismissedReviewTasks()
+        }
+
+        return tasks
+            .filter { dismissedReviewTaskIds.contains($0.id) == false }
+            .sorted { $0.sessionDate > $1.sessionDate }
+    }
+
+    private func reviewKey(bookingId: String, revieweeId: String, kind: ReviewSubjectKind) -> String {
+        "\(bookingId)|\(revieweeId)|\(kind.rawValue)"
+    }
+
+    private func sessionDate(for booking: Booking) -> Date {
+        booking.confirmedEnd ?? booking.requestedEnd
+    }
+
+    private func pendingReviewTargets(for booking: Booking, role: ViewerRole) -> [ReviewTarget] {
+        var targets: [ReviewTarget] = []
+
+        switch role {
+        case .artist:
+            if booking.studioId.isEmpty == false {
+                let key = reviewKey(bookingId: booking.id, revieweeId: booking.studioId, kind: .studio)
+                if authoredReviews[key] == nil {
+                    targets.append(ReviewTarget(revieweeId: booking.studioId, revieweeKind: .studio))
+                }
+            }
+
+            if booking.engineerId.isEmpty == false {
+                let key = reviewKey(bookingId: booking.id, revieweeId: booking.engineerId, kind: .engineer)
+                if authoredReviews[key] == nil {
+                    targets.append(ReviewTarget(revieweeId: booking.engineerId, revieweeKind: .engineer))
+                }
+            }
+        case .engineer, .studioOwner:
+            let key = reviewKey(bookingId: booking.id, revieweeId: booking.artistId, kind: .artist)
+            if authoredReviews[key] == nil {
+                targets.append(ReviewTarget(revieweeId: booking.artistId, revieweeKind: .artist))
+            }
+        case .unsupported, .unknown:
+            break
+        }
+
+        return targets
+    }
+
+    func revieweeName(for target: ReviewTarget) -> String {
+        switch target.revieweeKind {
+        case .studio:
+            return studioName(for: target.revieweeId)
+        case .artist, .engineer, .studioOwner:
+            return displayName(forUser: target.revieweeId)
+        }
+    }
+
+    func reviewTitle(for task: ReviewTask) -> String {
+        if task.targets.count > 1 {
+            return "Review this session"
+        }
+        if let target = task.targets.first {
+            switch target.revieweeKind {
+            case .studio:
+                return "Review \(revieweeName(for: target))"
+            case .engineer:
+                return "Rate \(revieweeName(for: target))"
+            case .artist:
+                return "Share feedback for \(revieweeName(for: target))"
+            case .studioOwner:
+                return "Review \(revieweeName(for: target))"
+            }
+        }
+        return "Leave a review"
+    }
+
+    func reviewSubtitle(for task: ReviewTask) -> String {
+        "Session completed on \(Self.reviewSessionFormatter.string(from: task.sessionDate))"
+    }
+
+    func reviewPrompt(for target: ReviewTarget) -> String {
+        switch target.revieweeKind {
+        case .studio:
+            return "How was the studio experience?"
+        case .engineer:
+            return "How did the engineer support your session?"
+        case .artist:
+            return "How was collaborating with this artist?"
+        case .studioOwner:
+            return "Share feedback about the studio owner."
+        }
+    }
+
+    func isSubmittingReview(for task: ReviewTask) -> Bool {
+        reviewActionInFlight.contains(task.id)
+    }
+
+    func submitReviews(task: ReviewTask, responses: [ReviewTarget: ReviewResponse]) async {
+        guard let user = currentUserProvider() else { return }
+        guard reviewActionInFlight.contains(task.id) == false else { return }
+
+        reviewActionInFlight.insert(task.id)
+        defer { reviewActionInFlight.remove(task.id) }
+
+        do {
+            for target in task.targets {
+                guard let response = responses[target], (1...5).contains(response.rating) else { continue }
+                let trimmedComment = response.comment.trimmingCharacters(in: .whitespacesAndNewlines)
+                var review = Review(
+                    bookingId: task.booking.id,
+                    reviewerId: user.id,
+                    reviewerAccountType: user.accountType,
+                    revieweeId: target.revieweeId,
+                    revieweeKind: target.revieweeKind,
+                    rating: response.rating,
+                    comment: trimmedComment
+                )
+                try await reviewService.submitReview(review)
+                review = review.updating(rating: response.rating, comment: trimmedComment)
+                let key = reviewKey(bookingId: review.bookingId, revieweeId: review.revieweeId, kind: review.revieweeKind)
+                authoredReviews[key] = review
+            }
+            pendingReviews.removeAll { $0.id == task.id }
+            dismissedReviewTaskIds.remove(task.id)
+            persistDismissedReviewTasks()
+            pendingReviews = buildReviewTasks(from: cachedBookings, role: viewerRole)
+        } catch {
+            #if DEBUG
+            print("[BookingInbox] failed to submit review task=\(task.id) error=\(error)")
+            #endif
+            self.errorMessage = error.localizedDescription
+        }
+    }
+
+    func hideReviewReminder(for task: ReviewTask) {
+        dismissedReviewTaskIds.insert(task.id)
+        persistDismissedReviewTasks()
+        pendingReviews.removeAll { $0.id == task.id }
+    }
+
+    struct ReviewResponse {
+        let rating: Int
+        let comment: String
+    }
+
+    private func persistDismissedReviewTasks() {
+        UserDefaults.standard.set(Array(dismissedReviewTaskIds), forKey: Self.dismissedReviewStorageKey)
+    }
+
+    private static let reviewSessionFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
 
     func displayName(forUser id: String) -> String {
         if let current = currentUserProvider(), current.id == id {
@@ -520,8 +755,22 @@ final class BookingInboxViewModel: ObservableObject {
         studioNames[id] ?? id
     }
 
+    func studio(for id: String) -> Studio? {
+        studioDetails[id]
+    }
+
     func roomName(for id: String) -> String {
         roomNames[id] ?? id
+    }
+
+    func userProfile(for id: String) -> UserProfile? {
+        if let profile = userProfiles[id] {
+            return profile
+        }
+        if let current = currentUserProvider(), current.id == id {
+            return current
+        }
+        return nil
     }
 
     func durationOptions(including value: Int) -> [Int] {
@@ -565,6 +814,21 @@ final class BookingInboxViewModel: ObservableObject {
         return formatter.string(from: start) + " – " + formatter.string(from: end)
     }
 
+    func attachConversation(_ conversationId: String, to booking: Booking) async {
+        guard booking.conversationId != conversationId else { return }
+
+        var updated = booking
+        updated.conversationId = conversationId
+        updated.updatedAt = Date()
+
+        do {
+            try await bookingService.updateBooking(updated)
+            await refresh()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     struct CalendarDaySummary: Identifiable {
         let date: Date
         let bookings: [Booking]
@@ -598,6 +862,20 @@ final class BookingInboxViewModel: ObservableObject {
         let bookings: [Booking]
 
         var id: String { engineerId }
+    }
+
+    struct ReviewTarget: Identifiable, Equatable, Hashable {
+        let revieweeId: String
+        let revieweeKind: ReviewSubjectKind
+
+        var id: String { "\(revieweeKind.rawValue)|\(revieweeId)" }
+    }
+
+    struct ReviewTask: Identifiable, Equatable {
+        let id: String
+        let booking: Booking
+        let targets: [ReviewTarget]
+        let sessionDate: Date
     }
 
     private static let timeRangeFormatter: DateFormatter = {

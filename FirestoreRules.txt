@@ -111,6 +111,85 @@ service cloud.firestore {
       );
     }
 
+    function getBookingDoc(bookingId) {
+      return get(/databases/$(database)/documents/bookings/$(bookingId));
+    }
+
+    function resolveBookingData(data) {
+      return data != null ? data.data : null;
+    }
+
+    function reviewBookingData(reviewData) {
+      return hasField(reviewData, 'bookingId')
+          && reviewData.bookingId is string
+          ? resolveBookingData(getBookingDoc(reviewData.bookingId))
+          : null;
+    }
+
+    function reviewerIsArtist(booking) {
+      return booking.artistId == request.auth.uid;
+    }
+
+    function reviewerIsEngineer(booking) {
+      return booking.engineerId == request.auth.uid;
+    }
+
+    function reviewerIsStudioOwner(booking) {
+      return booking.studioId is string && isStudioOwnerById(booking.studioId);
+    }
+
+    function reviewRoleAllowed(data, booking) {
+      return (
+        data.revieweeKind == 'studio'
+          && booking.studioId is string
+          && data.revieweeId == booking.studioId
+          && reviewerIsArtist(booking)
+          && data.reviewerAccountType == 'artist'
+      ) || (
+        data.revieweeKind == 'engineer'
+          && booking.engineerId is string
+          && data.revieweeId == booking.engineerId
+          && reviewerIsArtist(booking)
+          && data.reviewerAccountType == 'artist'
+      ) || (
+        data.revieweeKind == 'artist'
+          && booking.artistId is string
+          && data.revieweeId == booking.artistId
+          && (
+            (reviewerIsEngineer(booking) && data.reviewerAccountType == 'engineer')
+            || (reviewerIsStudioOwner(booking) && data.reviewerAccountType == 'studioOwner')
+          )
+      );
+    }
+
+    function reviewBookingEligible(data) {
+      let booking = reviewBookingData(data);
+      return booking != null
+        && booking.status == 'completed'
+        && reviewRoleAllowed(data, booking);
+    }
+
+    function validReviewPayload(data) {
+      return hasField(data, 'bookingId') && data.bookingId is string
+          && hasField(data, 'reviewerId') && data.reviewerId is string
+          && hasField(data, 'revieweeId') && data.revieweeId is string
+          && hasField(data, 'revieweeKind') && data.revieweeKind is string
+          && hasField(data, 'reviewerAccountType') && data.reviewerAccountType is string
+          && hasField(data, 'rating') && data.rating is number
+          && hasField(data, 'comment') && data.comment is string
+          && hasField(data, 'createdAt') && data.createdAt is timestamp
+          && hasField(data, 'updatedAt') && data.updatedAt is timestamp
+          && data.revieweeKind in ['studio', 'engineer', 'artist', 'studioOwner']
+          && data.rating >= 1 && data.rating <= 5;
+    }
+
+    function canSubmitReview(data) {
+      return isSignedIn()
+        && validReviewPayload(data)
+        && data.reviewerId == request.auth.uid
+        && reviewBookingEligible(data);
+    }
+
     function isEngineerRequestForCurrentOwner(data) {
       return data != null
           && hasField(data, 'studioOwnerId')
@@ -297,9 +376,14 @@ service cloud.firestore {
         && after.confirmedEnd == null;
     }
 
-    match /profiles/{userId} {
+    match /users/{userId} {
       allow read: if request.auth != null;
       allow write: if request.auth != null && request.auth.uid == userId;
+
+      match /availability/{entryId} {
+        allow read: if request.auth != null;
+        allow create, update, delete: if request.auth != null && request.auth.uid == userId;
+      }
     }
 
     match /studios/{studioId} {
@@ -326,16 +410,11 @@ service cloud.firestore {
         allow read: if true;
         allow create, update, delete: if isStudioOwnerById(studioId);
       }
-    }
 
-    match /studioAvailability/{studioId}/entries/{entryId} {
-      allow read: if isSignedIn();
-      allow create, update, delete: if isStudioOwnerById(studioId);
-    }
-
-    match /engineerAvailability/{engineerId}/entries/{entryId} {
-      allow read: if isSignedIn();
-      allow create, update, delete: if request.auth != null && request.auth.uid == engineerId;
+      match /availability/{entryId} {
+        allow read: if isSignedIn();
+        allow create, update, delete: if isStudioOwnerById(studioId);
+      }
     }
 
     match /bookings/{bookingId} {
@@ -367,6 +446,11 @@ service cloud.firestore {
         allow create: if canCreateMessage(conversationId, request.resource.data);
         allow update, delete: if false;
       }
+    }
+
+    match /reviews/{reviewId} {
+      allow read: if isSignedIn();
+      allow create: if canSubmitReview(request.resource.data);
     }
   }
 }

@@ -14,7 +14,14 @@ service firebase.storage {
     }
 
     function isValidStudioAsset(fileName) {
-      return fileName == "cover.jpg" || fileName == "logo.jpg";
+      return fileName in [
+        "cover.jpg",
+        "cover.jpeg",
+        "cover.png",
+        "logo.jpg",
+        "logo.jpeg",
+        "logo.png"
+      ];
     }
 
     function isProfileOwner(userId) {
@@ -48,22 +55,23 @@ service firebase.storage {
         && request.resource.contentType.matches('image/.+');
     }
 
-    match /studios/{studioId}/{fileName} {
+    match /users/{userId}/studios/{studioId}/{fileName} {
       // Everyone can view studio media that already exists.
       allow read: if resource != null;
 
       // Owners can upload or overwrite their assets with image files only.
       allow create, update: if isStudioOwner(studioId)
+        && request.auth.uid == userId
         && isValidStudioAsset(fileName)
         && request.resource != null
         && request.resource.size < 8 * 1024 * 1024
         && request.resource.contentType.matches('image/.+');
 
       // Owners can remove their own assets.
-      allow delete: if isStudioOwner(studioId);
+      allow delete: if isStudioOwner(studioId) && request.auth.uid == userId;
     }
 
-    match /profiles/{userId}/{fileName} {
+    match /users/{userId}/profile/{fileName} {
       // Everyone can view profile media that already exists.
       allow read: if resource != null;
 

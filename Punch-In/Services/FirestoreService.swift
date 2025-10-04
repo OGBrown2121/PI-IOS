@@ -55,6 +55,10 @@ protocol FirestoreService {
     func fetchBookings(for participantId: String, role: BookingParticipantRole) async throws -> [Booking]
     func createBooking(_ booking: Booking) async throws
     func updateBooking(_ booking: Booking) async throws
+
+    func fetchReviews(for revieweeId: String, kind: ReviewSubjectKind) async throws -> [Review]
+    func fetchReviewsAuthored(by reviewerId: String) async throws -> [Review]
+    func upsertReview(_ review: Review) async throws
 }
 
 struct FirebaseFirestoreService: FirestoreService {
@@ -126,7 +130,7 @@ struct FirebaseFirestoreService: FirestoreService {
     }
 
     func loadUserProfile(for userID: String) async throws -> UserProfile? {
-        let document = try await database.collection("profiles").document(userID).getDocument()
+        let document = try await database.collection("users").document(userID).getDocument()
         guard let data = document.data() else { return nil }
 
         return decodeUserProfile(id: document.documentID, data: data)
@@ -174,7 +178,7 @@ struct FirebaseFirestoreService: FirestoreService {
             data["profileImageURL"] = FieldValue.delete()
         }
 
-        try await database.collection("profiles").document(profile.id).setData(data, merge: true)
+        try await database.collection("users").document(profile.id).setData(data, merge: true)
     }
 
     func fetchEngineerRequest(studioId: String, engineerId: String) async throws -> StudioEngineerRequest? {
@@ -305,7 +309,7 @@ struct FirebaseFirestoreService: FirestoreService {
         var collected: [UserProfile] = []
         for chunk in chunked(uniqueIDs, size: 10) {
             let query = database
-                .collection("profiles")
+                .collection("users")
                 .whereField(FieldPath.documentID(), in: chunk)
             let snapshot = try await query.getDocuments()
             collected.append(contentsOf: snapshot.documents.map { document in
@@ -435,6 +439,78 @@ struct FirebaseFirestoreService: FirestoreService {
         ])
 #endif
         try await reference.setData(payload, merge: true)
+    }
+
+    func fetchReviews(for revieweeId: String, kind: ReviewSubjectKind) async throws -> [Review] {
+        let snapshot = try await database
+            .collection("reviews")
+            .whereField("revieweeId", isEqualTo: revieweeId)
+            .whereField("revieweeKind", isEqualTo: kind.rawValue)
+            .order(by: "createdAt", descending: true)
+            .getDocuments()
+
+        return snapshot.documents.compactMap { decodeReview(documentID: $0.documentID, data: $0.data()) }
+    }
+
+    func fetchReviewsAuthored(by reviewerId: String) async throws -> [Review] {
+        let snapshot = try await database
+            .collection("reviews")
+            .whereField("reviewerId", isEqualTo: reviewerId)
+            .getDocuments()
+
+        return snapshot.documents.compactMap { decodeReview(documentID: $0.documentID, data: $0.data()) }
+    }
+
+    func upsertReview(_ review: Review) async throws {
+        var data = encodeReview(review)
+        data["updatedAt"] = Timestamp(date: review.updatedAt)
+        try await database.collection("reviews").document(review.id).setData(data, merge: true)
+    }
+
+    private func encodeReview(_ review: Review) -> [String: Any] {
+        [
+            "bookingId": review.bookingId,
+            "reviewerId": review.reviewerId,
+            "reviewerAccountType": review.reviewerAccountType.rawValue,
+            "revieweeId": review.revieweeId,
+            "revieweeKind": review.revieweeKind.rawValue,
+            "rating": review.rating,
+            "comment": review.comment,
+            "createdAt": Timestamp(date: review.createdAt),
+            "updatedAt": Timestamp(date: review.updatedAt)
+        ]
+    }
+
+    private func decodeReview(documentID: String, data: [String: Any]) -> Review? {
+        guard
+            let bookingId = data["bookingId"] as? String,
+            let reviewerId = data["reviewerId"] as? String,
+            let reviewerAccountTypeRaw = data["reviewerAccountType"] as? String,
+            let revieweeId = data["revieweeId"] as? String,
+            let revieweeKindRaw = data["revieweeKind"] as? String,
+            let reviewerAccountType = AccountType(rawValue: reviewerAccountTypeRaw),
+            let revieweeKind = ReviewSubjectKind(rawValue: revieweeKindRaw)
+        else {
+            return nil
+        }
+
+        let rating = intValue(data["rating"]) ?? 0
+        let comment = data["comment"] as? String ?? ""
+        let createdAt = (data["createdAt"] as? Timestamp)?.dateValue() ?? Date()
+        let updatedAt = (data["updatedAt"] as? Timestamp)?.dateValue() ?? createdAt
+
+        return Review(
+            id: documentID,
+            bookingId: bookingId,
+            reviewerId: reviewerId,
+            reviewerAccountType: reviewerAccountType,
+            revieweeId: revieweeId,
+            revieweeKind: revieweeKind,
+            rating: rating,
+            comment: comment,
+            createdAt: createdAt,
+            updatedAt: updatedAt
+        )
     }
 
     private func decodeUserProfile(id: String, data: [String: Any]) -> UserProfile {
@@ -591,9 +667,9 @@ struct FirebaseFirestoreService: FirestoreService {
     private func availabilityCollection(scope: AvailabilityScope, ownerId: String) -> CollectionReference {
         switch scope {
         case .studio:
-            return database.collection("studioAvailability").document(ownerId).collection("entries")
+            return database.collection("studios").document(ownerId).collection("availability")
         case .engineer:
-            return database.collection("engineerAvailability").document(ownerId).collection("entries")
+            return database.collection("users").document(ownerId).collection("availability")
         }
     }
 
@@ -849,6 +925,7 @@ final class MockFirestoreService: FirestoreService {
     private var studioAvailabilityStore: [String: [AvailabilityEntry]] = [:]
     private var engineerAvailabilityStore: [String: [AvailabilityEntry]] = [:]
     private var bookingsStore: [String: Booking] = [:]
+    private var reviewsStore: [String: Review] = [:]
 
     func fetchStudios() async throws -> [Studio] {
         storedStudios
@@ -1059,6 +1136,22 @@ final class MockFirestoreService: FirestoreService {
             throw FirestoreServiceError.bookingConflict
         }
         bookingsStore[booking.id] = booking
+    }
+
+    func fetchReviews(for revieweeId: String, kind: ReviewSubjectKind) async throws -> [Review] {
+        reviewsStore.values
+            .filter { $0.revieweeId == revieweeId && $0.revieweeKind == kind }
+            .sorted { $0.createdAt > $1.createdAt }
+    }
+
+    func fetchReviewsAuthored(by reviewerId: String) async throws -> [Review] {
+        reviewsStore.values
+            .filter { $0.reviewerId == reviewerId }
+            .sorted { $0.createdAt > $1.createdAt }
+    }
+
+    func upsertReview(_ review: Review) async throws {
+        reviewsStore[review.id] = review
     }
 
     private func hasConflict(for booking: Booking) -> Bool {

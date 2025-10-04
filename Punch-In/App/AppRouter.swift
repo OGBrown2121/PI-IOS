@@ -88,6 +88,7 @@ private struct MainTabView: View {
                 BookingInboxView(
                     bookingService: di.bookingService,
                     firestoreService: di.firestoreService,
+                    reviewService: di.reviewService,
                     currentUserProvider: { appState.currentUser }
                 )
             }
@@ -154,11 +155,11 @@ private struct LiquidTabBar: View {
         .background(.ultraThinMaterial, in: backgroundShape)
         .overlay {
             backgroundShape
-                .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                .stroke(borderStrokeColor, lineWidth: 1)
         }
         .overlay(alignment: .top) {
             backgroundShape
-                .stroke(Color.white.opacity(overlayOpacity), lineWidth: 0.6)
+                .stroke(topHighlightColor, lineWidth: 0.6)
         }
         .clipShape(backgroundShape)
     }
@@ -167,12 +168,21 @@ private struct LiquidTabBar: View {
         colorScheme == .dark ? 0.06 : 0.12
     }
 
+    private var borderStrokeColor: Color {
+        colorScheme == .dark ? Color.white.opacity(0.18) : Color.black.opacity(0.09)
+    }
+
+    private var topHighlightColor: Color {
+        colorScheme == .dark ? Color.white.opacity(overlayOpacity) : Color.white.opacity(0.35)
+    }
+
     private var backgroundShape: RoundedRectangle {
         .init(cornerRadius: 22, style: .continuous)
     }
 }
 
 private struct LiquidTabBarItem: View {
+    @Environment(\.colorScheme) private var colorScheme
     let title: String
     let systemImage: String
     let isSelected: Bool
@@ -224,27 +234,43 @@ private struct LiquidTabBarItem: View {
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .stroke(Color.white.opacity(isSelected ? 0.18 : 0), lineWidth: 0.5)
+                    .stroke(highlightOverlayColor, lineWidth: 0.5)
             )
     }
 
     private var activeColors: [Color] {
-        [Theme.primaryGradientStart.opacity(0.35), Theme.primaryGradientEnd.opacity(0.35)]
+        if colorScheme == .dark {
+            return [Theme.primaryGradientStart.opacity(0.35), Theme.primaryGradientEnd.opacity(0.35)]
+        }
+        return [Theme.primaryGradientStart.opacity(0.95), Theme.primaryGradientEnd.opacity(0.95)]
     }
 
     private var inactiveColors: [Color] {
-        [Color.white.opacity(0.08), Color.white.opacity(0.02)]
+        if colorScheme == .dark {
+            return [Color.white.opacity(0.08), Color.white.opacity(0.02)]
+        }
+        return [Color.black.opacity(0.05), Color.black.opacity(0.015)]
     }
 
     private var iconColor: Color {
-        isSelected ? Color.white : Color.white.opacity(0.65)
+        if isSelected { return Color.white }
+        return colorScheme == .dark ? Color.white.opacity(0.65) : Color.primary.opacity(0.7)
     }
 
     private var textColor: Color {
-        isSelected ? Color.white : Color.white.opacity(0.7)
+        if isSelected { return Color.white }
+        return colorScheme == .dark ? Color.white.opacity(0.7) : Color.primary.opacity(0.7)
     }
 
     private var borderColor: Color {
-        isSelected ? Theme.primaryGradientEnd.opacity(0.5) : Color.white.opacity(0.12)
+        if isSelected {
+            return colorScheme == .dark ? Theme.primaryGradientEnd.opacity(0.5) : Theme.primaryGradientEnd.opacity(0.7)
+        }
+        return colorScheme == .dark ? Color.white.opacity(0.12) : Color.black.opacity(0.05)
+    }
+
+    private var highlightOverlayColor: Color {
+        guard isSelected else { return .clear }
+        return colorScheme == .dark ? Color.white.opacity(0.18) : Color.white.opacity(0.3)
     }
 }

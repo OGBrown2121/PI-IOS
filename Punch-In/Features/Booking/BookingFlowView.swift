@@ -81,38 +81,6 @@ struct BookingFlowView: View {
 
     private var bookingForm: some View {
         Form {
-            if let rooms = viewModel.context?.rooms, rooms.isEmpty == false {
-                Section("Room") {
-                    Picker("Room", selection: Binding(
-                        get: { viewModel.selectedRoom?.id ?? "" },
-                        set: { newValue in
-                            viewModel.selectedRoom = rooms.first { $0.id == newValue }
-                        }
-                    )) {
-                        ForEach(rooms) { room in
-                            roomPickerRow(for: room)
-                        }
-                    }
-                }
-            }
-
-            if let engineers = viewModel.context?.engineers, engineers.isEmpty == false {
-                Section("Engineer") {
-                    Picker("Engineer", selection: Binding(
-                        get: { viewModel.selectedEngineer?.id ?? "" },
-                        set: { newValue in
-                            viewModel.selectedEngineer = engineers.first { $0.id == newValue }
-                        }
-                    )) {
-                        ForEach(engineers) { engineer in
-                            Text(engineer.displayName.isEmpty ? engineer.username : engineer.displayName)
-                                .tag(engineer.id)
-                                .font(.body)
-                        }
-                    }
-                }
-            }
-
             Section("Schedule") {
                 DatePicker("Start", selection: $viewModel.startDate, displayedComponents: [.date, .hourAndMinute])
                     .datePickerStyle(.graphical)
@@ -154,6 +122,38 @@ struct BookingFlowView: View {
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+
+            if let rooms = viewModel.context?.rooms, rooms.isEmpty == false {
+                Section("Room") {
+                    Picker("Room", selection: Binding(
+                        get: { viewModel.selectedRoom?.id ?? "" },
+                        set: { newValue in
+                            viewModel.selectedRoom = rooms.first { $0.id == newValue }
+                        }
+                    )) {
+                        ForEach(rooms) { room in
+                            roomPickerRow(for: room)
+                        }
+                    }
+                }
+            }
+
+            if let engineers = viewModel.context?.engineers, engineers.isEmpty == false {
+                Section("Engineer") {
+                    Picker("Engineer", selection: Binding(
+                        get: { viewModel.selectedEngineer?.id ?? "" },
+                        set: { newValue in
+                            viewModel.selectedEngineer = engineers.first { $0.id == newValue }
+                        }
+                    )) {
+                        ForEach(engineers) { engineer in
+                            Text(engineer.displayName.isEmpty ? engineer.username : engineer.displayName)
+                                .tag(engineer.id)
+                                .font(.body)
+                        }
+                    }
                 }
             }
 

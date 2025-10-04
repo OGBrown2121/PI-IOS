@@ -10,7 +10,7 @@ The booking system enables artists to reserve sessions with studios and engineer
 
 ## Firestore Data Model
 ```
-profiles/{userId}
+users/{userId}
   accountType: "artist" | "engineer" | "studio"
   premium.isPremiumEngineer: bool
   premium.instantBookEnabled: bool
@@ -35,7 +35,7 @@ studios/{studioId}/rooms/{roomId}
   amenities: [string]
   isDefault: bool
 
-studioAvailability/{studioId}/entries/{availabilityId}
+studios/{studioId}/availability/{availabilityId}
   type: "recurring" | "block" | "bookingHold" | "selfBooking"
   roomId: string | null
   weekday: number // 0-6 when recurring
@@ -46,7 +46,7 @@ studioAvailability/{studioId}/entries/{availabilityId}
   sourceBookingId: string | null
   createdBy: string (uid)
 
-engineerAvailability/{engineerId}/entries/{availabilityId}
+users/{engineerId}/availability/{availabilityId}
   type: "recurring" | "block" | "selfBooking" | "bookingHold"
   weekday/startTimeMinutes/durationMinutes (for recurring)
   startDate/endDate (for one-off)
@@ -102,7 +102,7 @@ studioEngineerRelationships/{studioId}_{engineerId}
    - Confirms availability using aggregated availability documents.
    - Determines if instant booking is allowed (engineer premium + instant toggle + studio open + no conflicts).
    - Creates booking document with `pending` or `confirmed` status.
-   - Writes booking holds to `studioAvailability` and `engineerAvailability` when confirmed/instant.
+   - Writes booking holds to `studios/{studioId}/availability` and `users/{engineerId}/availability` when confirmed/instant.
    - Triggers notifications to studio owner and engineer when approval is required.
 
 2. **Booking Approval / Reschedule / Cancel (Cloud Functions)**

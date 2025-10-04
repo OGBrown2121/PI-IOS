@@ -690,7 +690,7 @@ final class FirestoreChatService: ChatService {
     // MARK: - Firestore lookup helpers
 
     private func searchProfiles(matching query: String) async throws -> [ChatParticipant] {
-        let collection = firestore.collection("profiles")
+        let collection = firestore.collection("users")
         let snapshot: QuerySnapshot
         if query.isEmpty {
             snapshot = try await collection.limit(to: 12).getDocuments()
