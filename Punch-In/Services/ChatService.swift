@@ -161,6 +161,15 @@ final class FirestoreChatService: ChatService {
         static let bio = "bio"
         static let fieldOne = "fieldOne"
         static let fieldTwo = "fieldTwo"
+        static let upcomingProjects = "upcomingProjects"
+        static let upcomingEvents = "upcomingEvents"
+        static let category = "category"
+        static let detail = "detail"
+        static let location = "location"
+        static let callToActionTitle = "callToActionTitle"
+        static let callToActionURL = "callToActionURL"
+        static let scheduledAt = "scheduledAt"
+        static let title = "title"
         static let city = "city"
         static let address = "address"
         static let ownerId = "ownerId"
@@ -398,16 +407,28 @@ final class FirestoreChatService: ChatService {
         threadId: String,
         groupSettings: ChatThread.GroupSettings
     ) async throws -> ChatThread {
+        var normalizedSettings = groupSettings
+        if let photo = normalizedSettings.photo,
+           photo.remoteURL == nil,
+           photo.imageData != nil {
+            let uploaded = try await ensureMediaUploaded(
+                photo,
+                conversationId: threadId,
+                messageId: "group-photo-\(UUID().uuidString)"
+            )
+            normalizedSettings.photo = uploaded
+        }
+
         let conversationRef = firestore.collection(Field.conversations).document(threadId)
         try await conversationRef.updateData([
-            Field.groupSettings: encodeGroupSettings(groupSettings)
+            Field.groupSettings: encodeGroupSettings(normalizedSettings)
         ])
 
         let document = try await conversationRef.getDocument()
         guard var thread = try decodeThread(from: document) else {
             throw ChatServiceError.threadNotFound
         }
-        thread = thread.updating(groupSettings: groupSettings)
+        thread = thread.updating(groupSettings: normalizedSettings)
         return thread
     }
 
@@ -441,10 +462,14 @@ final class FirestoreChatService: ChatService {
             base[Field.accountType] = profile.accountType.rawValue
             base[Field.profileImageURL] = profile.profileImageURL?.absoluteString
             base[Field.createdAt] = Timestamp(date: profile.createdAt)
+            let sanitizedProjects = profile.profileDetails.upcomingProjects.sanitized()
+            let sanitizedEvents = profile.profileDetails.upcomingEvents.sanitized()
             base[Field.profileDetails] = [
                 Field.bio: profile.profileDetails.bio,
                 Field.fieldOne: profile.profileDetails.fieldOne,
-                Field.fieldTwo: profile.profileDetails.fieldTwo
+                Field.fieldTwo: profile.profileDetails.fieldTwo,
+                Field.upcomingProjects: sanitizedProjects.map(encodeProfileSpotlight),
+                Field.upcomingEvents: sanitizedEvents.map(encodeProfileSpotlight)
             ]
         case let .studio(studio):
             base[Field.type] = ParticipantType.studio.rawValue
@@ -479,6 +504,27 @@ final class FirestoreChatService: ChatService {
         if let data = media.imageData {
             payload["fallbackSize"] = data.count
         }
+        return payload
+    }
+
+    private func encodeProfileSpotlight(_ item: ProfileSpotlight) -> [String: Any] {
+        var payload: [String: Any] = [
+            Field.id: item.id,
+            Field.category: item.category.rawValue,
+            Field.title: item.title,
+            Field.detail: item.detail,
+            Field.location: item.location,
+            Field.callToActionTitle: item.callToActionTitle
+        ]
+
+        if let scheduledAt = item.scheduledAt {
+            payload[Field.scheduledAt] = Timestamp(date: scheduledAt)
+        }
+
+        if let url = item.callToActionURL?.absoluteString {
+            payload[Field.callToActionURL] = url
+        }
+
         return payload
     }
 
@@ -570,10 +616,14 @@ final class FirestoreChatService: ChatService {
             let createdAt = (data[Field.createdAt] as? Timestamp)?.dateValue() ?? Date()
             let imageURL = (data[Field.profileImageURL] as? String).flatMap(URL.init(string:))
             let detailsRaw = data[Field.profileDetails] as? [String: Any] ?? [:]
+            let rawProjects = decodeProfileSpotlights(detailsRaw[Field.upcomingProjects], defaultCategory: .project)
+            let rawEvents = decodeProfileSpotlights(detailsRaw[Field.upcomingEvents], defaultCategory: .event)
             let details = AccountProfileDetails(
                 bio: detailsRaw[Field.bio] as? String ?? "",
                 fieldOne: detailsRaw[Field.fieldOne] as? String ?? "",
-                fieldTwo: detailsRaw[Field.fieldTwo] as? String ?? ""
+                fieldTwo: detailsRaw[Field.fieldTwo] as? String ?? "",
+                upcomingProjects: rawProjects.sanitized(),
+                upcomingEvents: rawEvents.sanitized()
             )
             let profile = UserProfile(
                 id: id,
@@ -617,6 +667,38 @@ final class FirestoreChatService: ChatService {
         guard let data = raw as? [String: Any] else { return nil }
         let url = (data[Field.remoteURL] as? String).flatMap(URL.init(string:))
         return ChatMedia(remoteURL: url)
+    }
+
+    private func decodeProfileSpotlights(
+        _ raw: Any?,
+        defaultCategory: ProfileSpotlight.Category
+    ) -> [ProfileSpotlight] {
+        guard let array = raw as? [[String: Any]] else { return [] }
+
+        return array.compactMap { entry in
+            let id = entry[Field.id] as? String ?? UUID().uuidString
+            let categoryRaw = entry[Field.category] as? String ?? defaultCategory.rawValue
+            let category = ProfileSpotlight.Category(rawValue: categoryRaw) ?? defaultCategory
+            let title = entry[Field.title] as? String ?? ""
+            let detail = entry[Field.detail] as? String ?? ""
+            let location = entry[Field.location] as? String ?? ""
+            let actionTitle = entry[Field.callToActionTitle] as? String ?? ""
+            let actionURLString = entry[Field.callToActionURL] as? String
+            let actionURL = actionURLString.flatMap(URL.init(string:))
+            let timestamp = entry[Field.scheduledAt] as? Timestamp
+            let scheduledAt = timestamp?.dateValue()
+
+            return ProfileSpotlight(
+                id: id,
+                category: category,
+                title: title,
+                detail: detail,
+                scheduledAt: scheduledAt,
+                location: location,
+                callToActionTitle: actionTitle,
+                callToActionURL: actionURL
+            )
+        }
     }
 
     private func decodeMessage(from document: QueryDocumentSnapshot, threadId: String) -> ChatMessage? {
@@ -743,10 +825,14 @@ final class FirestoreChatService: ChatService {
         let accountType = AccountType(rawValue: accountTypeRaw) ?? .artist
         let imageURL = (data[Field.profileImageURL] as? String).flatMap(URL.init(string:))
         let detailsData = data[Field.profileDetails] as? [String: Any] ?? [:]
+        let rawProjects = decodeProfileSpotlights(detailsData[Field.upcomingProjects], defaultCategory: .project)
+        let rawEvents = decodeProfileSpotlights(detailsData[Field.upcomingEvents], defaultCategory: .event)
         let details = AccountProfileDetails(
             bio: detailsData[Field.bio] as? String ?? "",
             fieldOne: detailsData[Field.fieldOne] as? String ?? "",
-            fieldTwo: detailsData[Field.fieldTwo] as? String ?? ""
+            fieldTwo: detailsData[Field.fieldTwo] as? String ?? "",
+            upcomingProjects: rawProjects.sanitized(),
+            upcomingEvents: rawEvents.sanitized()
         )
 
         return UserProfile(

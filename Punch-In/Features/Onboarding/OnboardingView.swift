@@ -82,6 +82,8 @@ struct OnboardingView: View {
                 accountTypeSection
                 primaryFields
                 bioField
+                upcomingProjectsSection
+                upcomingEventsSection
                 saveButton
 
                 if viewModel.isSaving {
@@ -303,6 +305,26 @@ struct OnboardingView: View {
         }
     }
 
+    private var upcomingProjectsSection: some View {
+        spotlightSection(
+            title: "Upcoming projects",
+            subtitle: "Pin works in progress or releases so collaborators know what’s next.",
+            icon: "hammer",
+            items: $viewModel.upcomingProjects,
+            category: .project
+        )
+    }
+
+    private var upcomingEventsSection: some View {
+        spotlightSection(
+            title: "Upcoming events",
+            subtitle: "Share listening parties, sessions, or workshops people can join.",
+            icon: "calendar",
+            items: $viewModel.upcomingEvents,
+            category: .event
+        )
+    }
+
     private var saveButton: some View {
         PrimaryButton(title: viewModel.isSaving ? mode.savingTitle : mode.primaryActionTitle) {
             Task {
@@ -404,6 +426,230 @@ struct OnboardingView: View {
                 profileImagePickerItem = nil
             }
         }
+    }
+
+    private func spotlightSection(
+        title: String,
+        subtitle: String,
+        icon: String,
+        items: Binding<[ProfileSpotlight]>,
+        category: ProfileSpotlight.Category
+    ) -> some View {
+        VStack(alignment: .leading, spacing: Theme.spacingMedium) {
+            HStack {
+                Label(title, systemImage: icon)
+                    .font(.headline)
+                Spacer()
+                Button {
+                    withAnimation {
+                        viewModel.addSpotlight(for: category)
+                    }
+                } label: {
+                    Label("Add", systemImage: "plus")
+                        .labelStyle(.titleAndIcon)
+                }
+                .buttonStyle(.bordered)
+                .disabled(!viewModel.canAddSpotlight(for: category))
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(subtitle)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
+                if category == .event {
+                    Text(eventsExpirationText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if items.wrappedValue.isEmpty {
+                Text("Nothing pinned yet. Add up to \(viewModel.maxSpotlightsPerCategory) \(category == .project ? "projects" : "events").")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, Theme.spacingSmall)
+            } else {
+                VStack(spacing: Theme.spacingMedium) {
+                    ForEach(items.wrappedValue) { spotlight in
+                        let spotlightBinding = binding(for: spotlight, in: items)
+                        spotlightCard(
+                            spotlight: spotlightBinding,
+                            category: category,
+                            onCancel: {
+                                withAnimation {
+                                    viewModel.removeSpotlight(id: spotlight.id, category: category)
+                                }
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private var eventsExpirationText: String {
+        let days = ProfileSpotlight.eventVisibilityWindowDays
+        if days <= 1 {
+            return "Events automatically disappear the day after they happen."
+        }
+        return "Events automatically disappear \(days) days after their scheduled time."
+    }
+
+    private func spotlightCard(
+        spotlight: Binding<ProfileSpotlight>,
+        category: ProfileSpotlight.Category,
+        onCancel: @escaping () -> Void
+    ) -> some View {
+        VStack(alignment: .leading, spacing: Theme.spacingMedium) {
+            HStack {
+                Text(category.title)
+                    .font(.headline.weight(.semibold))
+                Spacer(minLength: 0)
+                Button(role: .destructive) {
+                    onCancel()
+                } label: {
+                    Label("Cancel", systemImage: "xmark.circle")
+                        .labelStyle(.titleAndIcon)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: Theme.spacingSmall) {
+                Text("Title")
+                    .font(.footnote.weight(.semibold))
+                TextField("What’s the headline?", text: spotlight.title)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            VStack(alignment: .leading, spacing: Theme.spacingSmall) {
+                Text("Description")
+                    .font(.footnote.weight(.semibold))
+                TextField("Give a short description", text: spotlight.detail, axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            if category == .event {
+                VStack(alignment: .leading, spacing: Theme.spacingSmall) {
+                    Text("Location")
+                        .font(.footnote.weight(.semibold))
+                    TextField("Where is it happening?", text: spotlight.location)
+                        .textFieldStyle(.roundedBorder)
+                }
+            }
+
+            if category == .event {
+                VStack(alignment: .leading, spacing: Theme.spacingSmall) {
+                    Text("Scheduled for")
+                        .font(.footnote.weight(.semibold))
+                    DatePicker(
+                        "",
+                        selection: dateBinding(for: spotlight),
+                        displayedComponents: [.date, .hourAndMinute]
+                    )
+                    .datePickerStyle(.compact)
+                    .labelsHidden()
+                }
+            } else {
+                Toggle(isOn: dateToggleBinding(for: spotlight)) {
+                    Label("Add date", systemImage: "calendar.badge.plus")
+                }
+
+                if spotlight.wrappedValue.scheduledAt != nil {
+                    DatePicker(
+                        "Scheduled for",
+                        selection: dateBinding(for: spotlight),
+                        displayedComponents: [.date, .hourAndMinute]
+                    )
+                    .datePickerStyle(.compact)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: Theme.spacingSmall) {
+                Text("Call to action")
+                    .font(.footnote.weight(.semibold))
+                TextField("Button label (optional)", text: spotlight.callToActionTitle)
+                    .textFieldStyle(.roundedBorder)
+                TextField("Link (optional)", text: urlBinding(for: spotlight))
+                    .textFieldStyle(.roundedBorder)
+                    .keyboardType(.URL)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled(true)
+            }
+        }
+        .padding(Theme.spacingLarge)
+        .background(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(Color(uiColor: .secondarySystemBackground))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        )
+    }
+
+    private func dateToggleBinding(for spotlight: Binding<ProfileSpotlight>) -> Binding<Bool> {
+        Binding(
+            get: { spotlight.wrappedValue.scheduledAt != nil },
+            set: { isOn in
+                if isOn {
+                    spotlight.wrappedValue.scheduledAt = spotlight.wrappedValue.scheduledAt ?? Date()
+                } else {
+                    spotlight.wrappedValue.scheduledAt = nil
+                }
+            }
+        )
+    }
+
+    private func dateBinding(for spotlight: Binding<ProfileSpotlight>) -> Binding<Date> {
+        Binding(
+            get: { spotlight.wrappedValue.scheduledAt ?? Date() },
+            set: { newValue in
+                spotlight.wrappedValue.scheduledAt = newValue
+            }
+        )
+    }
+
+    private func urlBinding(for spotlight: Binding<ProfileSpotlight>) -> Binding<String> {
+        Binding(
+            get: {
+                spotlight.wrappedValue.callToActionURL?.absoluteString ?? ""
+            },
+            set: { newValue in
+                let trimmed = newValue.trimmed
+                guard trimmed.isEmpty == false else {
+                    spotlight.wrappedValue.callToActionURL = nil
+                    return
+                }
+
+                if let url = URL(string: trimmed), url.scheme != nil {
+                    spotlight.wrappedValue.callToActionURL = url
+                } else if let url = URL(string: "https://\(trimmed)") {
+                    spotlight.wrappedValue.callToActionURL = url
+                } else {
+                    spotlight.wrappedValue.callToActionURL = nil
+                }
+            }
+        )
+    }
+
+    private func binding(
+        for spotlight: ProfileSpotlight,
+        in items: Binding<[ProfileSpotlight]>
+    ) -> Binding<ProfileSpotlight> {
+        Binding(
+            get: {
+                guard let index = items.wrappedValue.firstIndex(where: { $0.id == spotlight.id }) else {
+                    return spotlight
+                }
+                return items.wrappedValue[index]
+            },
+            set: { newValue in
+                guard let index = items.wrappedValue.firstIndex(where: { $0.id == spotlight.id }) else {
+                    return
+                }
+                items.wrappedValue[index] = newValue
+            }
+        )
     }
 
     private var placeholderAvatar: some View {

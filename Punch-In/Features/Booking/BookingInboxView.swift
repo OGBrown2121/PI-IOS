@@ -84,6 +84,7 @@ private struct InboxContent: View {
     @State private var showCancelDialog = false
     @State private var reviewTask: BookingInboxViewModel.ReviewTask?
     @State private var bookingForDetails: Booking?
+    @State private var showHistorySheet = false
 
     var body: some View {
         VStack(spacing: 12) {
@@ -95,6 +96,10 @@ private struct InboxContent: View {
             .pickerStyle(.segmented)
             .padding(.horizontal)
             .padding(.top)
+
+            if viewModel.pastBookings.isEmpty == false {
+                historyButton
+            }
 
             if viewModel.pendingReviews.isEmpty == false {
                 PendingReviewsSection(
@@ -174,6 +179,11 @@ private struct InboxContent: View {
         .sheet(item: $bookingForDetails) { booking in
             BookingDetailSheet(booking: booking)
         }
+        .sheet(isPresented: $showHistorySheet) {
+            PastSessionsLogView(onSelect: { booking in
+                bookingForDetails = booking
+            })
+        }
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Menu {
@@ -186,6 +196,18 @@ private struct InboxContent: View {
                 }
             }
         }
+    }
+
+    private var historyButton: some View {
+        Button {
+            showHistorySheet = true
+        } label: {
+            Label("View session history", systemImage: "clock.arrow.circlepath")
+                .font(.subheadline.weight(.semibold))
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.bordered)
+        .padding(.horizontal)
     }
 }
 
@@ -627,6 +649,7 @@ private struct BookingDetailSheet: View {
 
     @State private var localBooking: Booking
     @State private var isLoadingChat = false
+    @State private var isCompleting = false
     @State private var chatThread: ChatThread?
     @State private var errorMessage: String?
 
@@ -639,6 +662,9 @@ private struct BookingDetailSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     sessionCard
+                    if showSessionActions {
+                        sessionActionsCard
+                    }
                     locationCard
                     participantsCard
                     notesCard
@@ -676,6 +702,10 @@ private struct BookingDetailSheet: View {
         }
     }
 
+    private var showSessionActions: Bool {
+        viewModel.canComplete(localBooking)
+    }
+
     private var sessionCard: some View {
         detailCard(title: "Session") {
             VStack(alignment: .leading, spacing: 8) {
@@ -705,6 +735,35 @@ private struct BookingDetailSheet: View {
             }
             .font(.subheadline)
             .foregroundStyle(.secondary)
+        }
+    }
+
+    private var sessionActionsCard: some View {
+        detailCard(title: "Session actions") {
+            VStack(alignment: .leading, spacing: 12) {
+                if viewModel.canComplete(localBooking) {
+                    Button {
+                        Task { await markSessionCompleted() }
+                    } label: {
+                        if isCompleting {
+                            HStack {
+                                ProgressView()
+                                Text("Completing…")
+                            }
+                            .frame(maxWidth: .infinity)
+                        } else {
+                            Label("Mark as completed", systemImage: "checkmark.circle")
+                                .frame(maxWidth: .infinity)
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.green)
+                    .disabled(isCompleting)
+                    Text("Move this session to your history and unlock post-session tasks.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
     }
 
@@ -923,6 +982,16 @@ private struct BookingDetailSheet: View {
         }
     }
 
+    private func markSessionCompleted() async {
+        guard isCompleting == false else { return }
+        isCompleting = true
+        await viewModel.complete(localBooking)
+        await MainActor.run {
+            localBooking.status = .completed
+            isCompleting = false
+        }
+    }
+
     private func buildChatParticipants(excluding currentUserId: String) throws -> [ChatParticipant] {
         guard let studio = viewModel.studio(for: localBooking.studioId) else {
             throw BookingDetailError.missingStudio
@@ -1035,6 +1104,203 @@ private struct BookingDetailSheet: View {
     }
 }
 
+private struct PastSessionsLogView: View {
+    @EnvironmentObject private var viewModel: BookingInboxViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    let onSelect: (Booking) -> Void
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if groupedHistory.isEmpty {
+                    ContentUnavailableView(
+                        "No past sessions",
+                        systemImage: "clock.badge.questionmark",
+                        description: Text("Completed and cancelled sessions will show up here for reference.")
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(uiColor: .systemGroupedBackground))
+                } else {
+                    List {
+                        ForEach(groupedHistory) { section in
+                            Section(section.title) {
+                                ForEach(section.bookings) { booking in
+                                    PastSessionRow(booking: booking) { selected in
+                                        onSelect(selected)
+                                        dismiss()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .listStyle(.insetGrouped)
+                }
+            }
+            .navigationTitle("Session history")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private var groupedHistory: [HistorySection] {
+        let calendar = Calendar.current
+        let grouped = Dictionary(grouping: viewModel.pastBookings) { booking -> Date in
+            let components = calendar.dateComponents([.year, .month], from: booking.requestedStart)
+            return calendar.date(from: components) ?? booking.requestedStart
+        }
+        return grouped
+            .map { entry in
+                HistorySection(date: entry.key, bookings: entry.value.sorted { $0.requestedStart > $1.requestedStart })
+            }
+            .sorted { $0.date > $1.date }
+    }
+
+    private struct HistorySection: Identifiable {
+        let date: Date
+        let bookings: [Booking]
+
+        var id: Date { date }
+
+        var title: String {
+            Self.titleFormatter.string(from: date)
+        }
+
+        private static let titleFormatter: DateFormatter = {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "LLLL yyyy"
+            return formatter
+        }()
+    }
+}
+
+private struct PastSessionRow: View {
+    @EnvironmentObject private var viewModel: BookingInboxViewModel
+
+    let booking: Booking
+    let onSelect: (Booking) -> Void
+
+    @State private var isCompleting = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(dateRangeText)
+                    .font(.headline)
+                Spacer()
+                statusLabel
+            }
+
+            Label("Studio: \(viewModel.studioName(for: booking.studioId))", systemImage: "building.2")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            Label("Artist: \(viewModel.displayName(forUser: booking.artistId))", systemImage: "person")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            Label("Engineer: \(viewModel.displayName(forUser: booking.engineerId))", systemImage: "person.crop.rectangle")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            if booking.notes.isEmpty == false {
+                Text(booking.notes)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 12) {
+                Button {
+                    onSelect(booking)
+                } label: {
+                    Label("View details", systemImage: "info.circle")
+                }
+                .buttonStyle(.bordered)
+
+                if viewModel.canComplete(booking) {
+                    Button {
+                        Task { await markCompleted() }
+                    } label: {
+                        if isCompleting {
+                            ProgressView()
+                        } else {
+                            Label("Mark completed", systemImage: "checkmark.circle")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.green)
+                    .disabled(isCompleting)
+                }
+            }
+        }
+        .padding(.vertical, 8)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            onSelect(booking)
+        }
+    }
+
+    private var statusLabel: some View {
+        let descriptor = statusDescriptor
+        return Label(descriptor.text, systemImage: descriptor.icon)
+            .font(.caption.weight(.semibold))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .foregroundStyle(descriptor.color)
+            .background(descriptor.color.opacity(0.14), in: Capsule())
+    }
+
+    private var statusDescriptor: (text: String, icon: String, color: Color) {
+        if booking.status == .pending {
+            if booking.approval.requiresEngineerApproval && booking.approval.requiresStudioApproval {
+                return ("Pending", "hourglass", .orange)
+            }
+            if booking.approval.requiresStudioApproval {
+                return ("Awaiting studio", "building.2", .orange)
+            }
+            if booking.approval.requiresEngineerApproval {
+                return ("Awaiting engineer", "person.crop.rectangle", .orange)
+            }
+            return ("Pending", "hourglass", .orange)
+        }
+
+        switch booking.status {
+        case .confirmed:
+            return ("Confirmed", "checkmark.circle", .green)
+        case .completed:
+            return ("Completed", "checkmark.seal", .blue)
+        case .cancelled:
+            return ("Cancelled", "xmark", .red)
+        case .rescheduled:
+            return ("Rescheduled", "arrow.uturn.right", .purple)
+        case .pending:
+            return ("Pending", "hourglass", .orange)
+        }
+    }
+
+    private var dateRangeText: String {
+        Self.dateIntervalFormatter.string(from: booking.requestedStart, to: booking.requestedEnd)
+    }
+
+    private static let dateIntervalFormatter: DateIntervalFormatter = {
+        let formatter = DateIntervalFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
+
+    private func markCompleted() async {
+        guard isCompleting == false else { return }
+        isCompleting = true
+        await viewModel.complete(booking)
+        await MainActor.run { isCompleting = false }
+    }
+}
+
 private enum BookingDetailError: LocalizedError {
     case missingStudio
     case missingEngineer
@@ -1087,14 +1353,22 @@ private struct BookingRow: View {
                 .padding(.vertical, 4)
                 .background(badge.color.opacity(0.14), in: Capsule())
 
-            if viewModel.canCancel(booking) || viewModel.canReschedule(booking) {
+            let canCancel = viewModel.canCancel(booking)
+            let canReschedule = viewModel.canReschedule(booking)
+            let canComplete = viewModel.canComplete(booking)
+            if canCancel || canReschedule || canComplete {
                 Menu {
-                    if viewModel.canReschedule(booking) {
+                    if canComplete {
+                        Button("Mark completed") {
+                            Task { await viewModel.complete(booking) }
+                        }
+                    }
+                    if canReschedule {
                         Button("Reschedule") {
                             onReschedule(booking)
                         }
                     }
-                    if viewModel.canCancel(booking) {
+                    if canCancel {
                         Button("Cancel session", role: .destructive) {
                             onCancel(booking)
                         }

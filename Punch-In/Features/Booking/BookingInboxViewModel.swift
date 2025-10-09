@@ -45,6 +45,7 @@ final class BookingInboxViewModel: ObservableObject {
         }
     }
     @Published private(set) var calendarBookings: [Booking] = []
+    @Published private(set) var pastBookings: [Booking] = []
     @Published private(set) var pendingReviews: [ReviewTask] = []
     @Published private var actionInFlight: Set<String> = []
     @Published private var reviewActionInFlight: Set<String> = []
@@ -62,6 +63,7 @@ final class BookingInboxViewModel: ObservableObject {
     private let calendar: Calendar
     private let rescheduleDurationOptions: [Int] = [30, 60, 90, 120, 180, 240]
     private var ownedStudioEngineerIds: Set<String> = []
+    private var ownedStudioIds: Set<String> = []
     private var authoredReviews: [String: Review] = [:]
     private var cachedBookings: [Booking] = []
     private var dismissedReviewTaskIds: Set<String>
@@ -103,6 +105,7 @@ final class BookingInboxViewModel: ObservableObject {
             pendingApprovals = []
             scheduledBookings = []
             calendarBookings = []
+            pastBookings = []
             pendingReviews = []
             cachedBookings = []
             return
@@ -122,6 +125,7 @@ final class BookingInboxViewModel: ObservableObject {
             pendingApprovals = []
             scheduledBookings = []
             calendarBookings = []
+            pastBookings = []
             engineerProfiles = [:]
             pendingReviews = []
             cachedBookings = []
@@ -167,6 +171,22 @@ final class BookingInboxViewModel: ObservableObject {
             return booking.engineerId == user.id && booking.status != .cancelled && booking.status != .completed
         case .studioOwner:
             return booking.status != .cancelled && booking.status != .completed
+        default:
+            return false
+        }
+    }
+
+    func canComplete(_ booking: Booking) -> Bool {
+        guard booking.status != .cancelled && booking.status != .completed else { return false }
+        guard let user = currentUserProvider() else { return false }
+        let now = Date()
+        guard booking.requestedEnd <= now else { return false }
+
+        switch viewerRole {
+        case .engineer:
+            return booking.engineerId == user.id
+        case .studioOwner:
+            return ownedStudioIds.contains(booking.studioId)
         default:
             return false
         }
@@ -227,6 +247,30 @@ final class BookingInboxViewModel: ObservableObject {
                 break
             }
             updated.approval = approval
+            updated.updatedAt = Date()
+            return updated
+        }
+    }
+
+    func complete(_ booking: Booking) async {
+        guard canComplete(booking) else { return }
+        await performMutation(on: booking) { booking in
+            var updated = booking
+            var approval = updated.approval
+            approval.requiresEngineerApproval = false
+            approval.requiresStudioApproval = false
+            if let user = self.currentUserProvider() {
+                approval.resolvedBy = user.id
+                approval.resolvedAt = Date()
+            }
+            updated.approval = approval
+            updated.status = .completed
+            if updated.confirmedStart == nil {
+                updated.confirmedStart = updated.requestedStart
+            }
+            if updated.confirmedEnd == nil {
+                updated.confirmedEnd = updated.requestedEnd
+            }
             updated.updatedAt = Date()
             return updated
         }
@@ -343,28 +387,34 @@ final class BookingInboxViewModel: ObservableObject {
 
     private func loadEngineerBookings(for user: UserProfile) async {
         do {
+            ownedStudioIds = []
             let bookings = try await bookingService.fetchBookings(for: user.id, role: .engineer)
             let sorted = bookings.sorted { $0.requestedStart < $1.requestedStart }
+            let now = Date()
             let pending = sorted.filter { booking in
                 booking.status == .pending && booking.approval.requiresEngineerApproval
             }
             let pendingIds = Set(pending.map { $0.id })
             let upcoming = sorted.filter { booking in
                 booking.status != .cancelled
-                    && booking.requestedEnd > Date()
+                    && booking.requestedEnd > now
                     && pendingIds.contains(booking.id) == false
             }
+            let historical = sorted.filter { isPastBooking($0, relativeTo: now) }
+            let calendarEligible = sorted.filter { isPastBooking($0, relativeTo: now) == false }
             cachedBookings = sorted
             await resolveMetadata(for: sorted)
-            updateCalendarData(with: sorted)
+            updateCalendarData(with: calendarEligible)
             pendingApprovals = pending
             scheduledBookings = upcoming
+            pastBookings = historical
             await rebuildPendingReviews(with: sorted, for: user, role: .engineer)
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
             pendingApprovals = []
             scheduledBookings = []
+            pastBookings = []
             pendingReviews = []
             cachedBookings = []
         }
@@ -372,12 +422,18 @@ final class BookingInboxViewModel: ObservableObject {
 
     private func loadArtistBookings(for user: UserProfile) async {
         do {
+            ownedStudioIds = []
             let bookings = try await bookingService.fetchBookings(for: user.id, role: .artist)
             let sorted = bookings.sorted { $0.requestedStart < $1.requestedStart }
+            let now = Date()
+            let historical = sorted.filter { isPastBooking($0, relativeTo: now) }
+            let upcoming = sorted.filter { isPastBooking($0, relativeTo: now) == false && $0.status != .cancelled }
+            let calendarEligible = sorted.filter { isPastBooking($0, relativeTo: now) == false }
             cachedBookings = sorted
-            scheduledBookings = sorted
+            scheduledBookings = upcoming
             await resolveMetadata(for: sorted)
-            updateCalendarData(with: sorted)
+            updateCalendarData(with: calendarEligible)
+            pastBookings = historical
             pendingApprovals = []
             await rebuildPendingReviews(with: sorted, for: user, role: .artist)
             errorMessage = nil
@@ -385,6 +441,7 @@ final class BookingInboxViewModel: ObservableObject {
             errorMessage = error.localizedDescription
             scheduledBookings = []
             pendingApprovals = []
+            pastBookings = []
             pendingReviews = []
             cachedBookings = []
         }
@@ -394,13 +451,16 @@ final class BookingInboxViewModel: ObservableObject {
         do {
             let studios = try await firestore.fetchStudios()
             let ownedStudios = studios.filter { $0.ownerId == user.id }
+            ownedStudioIds = Set(ownedStudios.map { $0.id })
             #if DEBUG
             print("[BookingInbox] studio owner=\(user.id) owns: \(ownedStudios.map { $0.id }))")
             #endif
 
             guard ownedStudios.isEmpty == false else {
+                ownedStudioIds = []
                 pendingApprovals = []
                 scheduledBookings = []
+                pastBookings = []
                 errorMessage = "Add a studio to receive booking requests."
                 updateCalendarData(with: [])
                 return
@@ -419,25 +479,30 @@ final class BookingInboxViewModel: ObservableObject {
             let sorted = allBookings.sorted { $0.requestedStart < $1.requestedStart }
             let pending = sorted.filter { $0.status == .pending && $0.approval.requiresStudioApproval }
             let pendingIds = Set(pending.map { $0.id })
+            let now = Date()
             let upcoming = sorted.filter { booking in
                 booking.status != .cancelled
-                    && booking.requestedEnd > Date()
+                    && booking.requestedEnd > now
                     && pendingIds.contains(booking.id) == false
             }
+            let historical = sorted.filter { isPastBooking($0, relativeTo: now) }
+            let calendarEligible = sorted.filter { isPastBooking($0, relativeTo: now) == false }
 
             cachedBookings = sorted
             await resolveMetadata(for: sorted, ownedStudios: ownedStudios)
             await loadEngineerProfilesIfNeeded(for: ownedStudios)
-            updateCalendarData(with: sorted)
+            updateCalendarData(with: calendarEligible)
 
             pendingApprovals = pending
             scheduledBookings = upcoming
+            pastBookings = historical
             await rebuildPendingReviews(with: sorted, for: user, role: .studioOwner)
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
             pendingApprovals = []
             scheduledBookings = []
+            pastBookings = []
             pendingReviews = []
             cachedBookings = []
         }
@@ -452,6 +517,13 @@ final class BookingInboxViewModel: ObservableObject {
         case .studioOwner:
             return .studioOwner
         }
+    }
+
+    private func isPastBooking(_ booking: Booking, relativeTo referenceDate: Date) -> Bool {
+        if booking.status == .completed || booking.status == .cancelled {
+            return true
+        }
+        return booking.requestedEnd < referenceDate
     }
 
     func bookings(for date: Date) -> [Booking] {

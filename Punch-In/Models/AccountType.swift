@@ -42,9 +42,10 @@ struct AccountProfileDetails: Codable, Equatable {
     var bio: String = ""
     var fieldOne: String = ""
     var fieldTwo: String = ""
+    var upcomingProjects: [ProfileSpotlight] = []
+    var upcomingEvents: [ProfileSpotlight] = []
 
     var isComplete: Bool {
         !bio.trimmed.isEmpty && !fieldOne.trimmed.isEmpty && !fieldTwo.trimmed.isEmpty
     }
 }
-

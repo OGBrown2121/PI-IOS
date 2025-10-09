@@ -18,6 +18,10 @@ struct EngineerDetailView: View {
     @State private var reviews: [Review] = []
     @State private var isLoadingReviews = false
     @State private var reviewsErrorMessage: String?
+    @State private var followStats: FollowStats = .empty
+    @State private var isLoadingFollowStats = true
+    @State private var isUpdatingFollow = false
+    @State private var followErrorMessage: String?
 
     init(engineerId: String, profile: UserProfile? = nil) {
         self.engineerId = engineerId
@@ -30,6 +34,22 @@ struct EngineerDetailView: View {
                 ScrollView(.vertical, showsIndicators: false) {
                     VStack(alignment: .leading, spacing: Theme.spacingLarge) {
                         heroSection(for: profile)
+                        if profile.profileDetails.upcomingProjects.isEmpty == false {
+                            ProfileSpotlightSection(
+                                title: "Pinned Projects",
+                                icon: "hammer",
+                                spotlights: profile.profileDetails.upcomingProjects,
+                                accentColor: Theme.primaryColor
+                            )
+                        }
+                        if profile.profileDetails.upcomingEvents.isEmpty == false {
+                            ProfileSpotlightSection(
+                                title: "Upcoming Events",
+                                icon: "calendar",
+                                spotlights: profile.profileDetails.upcomingEvents,
+                                accentColor: Color.purple
+                            )
+                        }
                         expertiseSection(for: profile)
                         detailsSection(for: profile)
                         reviewsSection
@@ -66,6 +86,7 @@ struct EngineerDetailView: View {
         }
         .task {
             await loadProfileIfNeeded()
+            await refreshFollowStatsIfNeeded()
             await loadStudiosIfNeeded()
             await loadReviews()
         }
@@ -91,15 +112,24 @@ struct EngineerDetailView: View {
         })
     }
 
+    private enum EngineerHeroMetrics {
+        static let avatarSize: CGFloat = 88
+        static let cardCornerRadius: CGFloat = 26
+        static let horizontalPadding: CGFloat = Theme.spacingLarge
+        static let verticalPadding: CGFloat = Theme.spacingMedium * CGFloat(0.85)
+        static let shadowRadius: CGFloat = 6
+        static let shadowYOffset: CGFloat = 4
+    }
+
     private func heroSection(for profile: UserProfile) -> some View {
-        VStack(spacing: Theme.spacingSmall) {
+        VStack(spacing: Theme.spacingSmall * CGFloat(0.8)) {
             avatar(for: profile)
                 .padding(.bottom, Theme.spacingSmall)
 
             Text(profile.accountType.title.uppercased())
-                .font(.caption.weight(.heavy))
-                .padding(.horizontal, 14)
-                .padding(.vertical, 6)
+                .font(.caption2.weight(.heavy))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
                 .background(
                     Capsule()
                         .fill(Color.white.opacity(0.15))
@@ -110,34 +140,120 @@ struct EngineerDetailView: View {
                 )
 
             Text(profile.displayName.isEmpty ? profile.username : profile.displayName)
-                .font(.largeTitle.weight(.heavy))
+                .font(.title2.weight(.heavy))
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.white)
 
             Text("@\(profile.username)")
-                .font(.subheadline.weight(.medium))
+                .font(.footnote.weight(.semibold))
                 .foregroundStyle(.white.opacity(0.85))
 
             if !profile.profileDetails.bio.isEmpty {
                 Text(profile.profileDetails.bio)
-                    .font(Theme.bodyFont())
+                    .font(.footnote)
                     .foregroundStyle(.white.opacity(0.9))
                     .multilineTextAlignment(.center)
-                    .padding(.top, Theme.spacingSmall)
+                    .padding(.top, Theme.spacingSmall * CGFloat(0.75))
             }
+
+            followSummarySection(for: profile)
         }
         .frame(maxWidth: .infinity)
-        .padding(.horizontal, Theme.spacingLarge)
-        .padding(.vertical, Theme.spacingLarge * 1.35)
+        .padding(.horizontal, EngineerHeroMetrics.horizontalPadding)
+        .padding(.vertical, EngineerHeroMetrics.verticalPadding)
         .background(
-            RoundedRectangle(cornerRadius: 32, style: .continuous)
+            RoundedRectangle(cornerRadius: EngineerHeroMetrics.cardCornerRadius, style: .continuous)
                 .fill(heroGradient)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 32, style: .continuous)
+            RoundedRectangle(cornerRadius: EngineerHeroMetrics.cardCornerRadius, style: .continuous)
                 .stroke(.white.opacity(0.15), lineWidth: 1)
         )
-        .shadow(color: Theme.primaryColor.opacity(0.28), radius: 18, x: 0, y: 12)
+        .shadow(
+            color: Theme.primaryColor.opacity(0.18),
+            radius: EngineerHeroMetrics.shadowRadius,
+            x: 0,
+            y: EngineerHeroMetrics.shadowYOffset
+        )
+    }
+
+    private func followSummarySection(for profile: UserProfile) -> some View {
+        VStack(spacing: Theme.spacingSmall * CGFloat(0.9)) {
+            if isLoadingFollowStats {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .tint(.white)
+            } else {
+                HStack(spacing: Theme.spacingMedium) {
+                    followMetricView(count: followStats.followersCount, label: followersLabel)
+                    followMetricView(count: followStats.followingCount, label: "Following")
+                }
+            }
+
+            if shouldShowFollowButton(for: profile) {
+                Button {
+                    Task { await handleFollowTap(for: profile) }
+                } label: {
+                    ZStack {
+                        HStack(spacing: 8) {
+                            Image(systemName: followStats.isFollowing ? "checkmark" : "person.badge.plus")
+                                .font(.subheadline.weight(.semibold))
+                            Text(followStats.isFollowing ? "Following" : "Follow")
+                                .font(.subheadline.weight(.semibold))
+                        }
+                        .opacity(isUpdatingFollow ? 0 : 1)
+
+                        if isUpdatingFollow {
+                            ProgressView()
+                                .progressViewStyle(.circular)
+                                .tint(followStats.isFollowing ? .white : Theme.primaryColor)
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                }
+                .buttonStyle(.plain)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(followStats.isFollowing ? Color.white.opacity(0.2) : Color.white)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Color.white.opacity(followStats.isFollowing ? 0.4 : 0), lineWidth: 1)
+                )
+                .foregroundStyle(followStats.isFollowing ? Color.white : Theme.primaryColor)
+                .disabled(isUpdatingFollow || isLoadingFollowStats)
+                .padding(.top, Theme.spacingSmall)
+            }
+
+            if let message = followErrorMessage, message.isEmpty == false {
+                Text(message)
+                    .font(.footnote)
+                    .foregroundStyle(Color.red.opacity(0.85))
+                    .multilineTextAlignment(.center)
+            }
+        }
+    }
+
+    private func followMetricView(count: Int, label: String) -> some View {
+        VStack(spacing: 4) {
+            Text("\(count)")
+                .font(.headline.weight(.bold))
+                .foregroundStyle(.white)
+            Text(label.uppercased())
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.75))
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private var followersLabel: String {
+        followStats.followersCount == 1 ? "Follower" : "Followers"
+    }
+
+    private func shouldShowFollowButton(for profile: UserProfile) -> Bool {
+        guard let currentUser = appState.currentUser else { return false }
+        return currentUser.id != profile.id
     }
 
     private func expertiseSection(for profile: UserProfile) -> some View {
@@ -353,11 +469,11 @@ struct EngineerDetailView: View {
                 placeholderAvatar(for: profile)
             }
         }
-        .frame(width: 120, height: 120)
+        .frame(width: EngineerHeroMetrics.avatarSize, height: EngineerHeroMetrics.avatarSize)
         .clipShape(Circle())
         .overlay(
             Circle()
-                .stroke(Color.white.opacity(0.6), lineWidth: 4)
+                .stroke(Color.white.opacity(0.6), lineWidth: 3)
         )
         .shadow(color: Color.black.opacity(0.25), radius: 12, y: 6)
     }
@@ -396,6 +512,14 @@ struct EngineerDetailView: View {
         )
     }
 
+    private func activeProjects(for profile: UserProfile) -> [ProfileSpotlight] {
+        profile.profileDetails.upcomingProjects.sanitized()
+    }
+
+    private func activeEvents(for profile: UserProfile) -> [ProfileSpotlight] {
+        profile.profileDetails.upcomingEvents.sanitized()
+    }
+
     private func sectionCard<Content: View>(title: String, icon: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: Theme.spacingMedium) {
             Label(title, systemImage: icon)
@@ -427,6 +551,53 @@ struct EngineerDetailView: View {
                 .foregroundStyle(.primary)
                 .multilineTextAlignment(.trailing)
         }
+    }
+
+    @MainActor
+    private func refreshFollowStatsIfNeeded() async {
+        guard let profile else {
+            isLoadingFollowStats = false
+            return
+        }
+        isLoadingFollowStats = true
+        followErrorMessage = nil
+        do {
+            let stats = try await di.firestoreService.loadFollowStats(
+                for: profile.id,
+                viewerId: appState.currentUser?.id
+            )
+            followStats = stats
+        } catch {
+            followStats = .empty
+            followErrorMessage = error.localizedDescription
+        }
+        isLoadingFollowStats = false
+    }
+
+    @MainActor
+    private func handleFollowTap(for profile: UserProfile) async {
+        guard !isUpdatingFollow else { return }
+        guard let currentUser = appState.currentUser else { return }
+        guard currentUser.id != profile.id else { return }
+
+        isUpdatingFollow = true
+        followErrorMessage = nil
+
+        do {
+            if followStats.isFollowing {
+                try await di.firestoreService.unfollow(userId: currentUser.id, targetUserId: profile.id)
+                followStats.isFollowing = false
+                followStats.followersCount = max(followStats.followersCount - 1, 0)
+            } else {
+                try await di.firestoreService.follow(userId: currentUser.id, targetUserId: profile.id)
+                followStats.isFollowing = true
+                followStats.followersCount += 1
+            }
+        } catch {
+            followErrorMessage = error.localizedDescription
+        }
+
+        isUpdatingFollow = false
     }
 
     private func loadProfileIfNeeded() async {
@@ -501,5 +672,15 @@ private struct InfoPill: View {
     NavigationStack {
         EngineerDetailView(engineerId: "preview", profile: .mockEngineer)
             .environment(\.di, DIContainer.makeMock())
+            .environmentObject(EngineerDetailView.previewAppState)
+    }
+}
+
+extension EngineerDetailView {
+    fileprivate static var previewAppState: AppState {
+        let state = AppState()
+        state.isAuthenticated = true
+        state.currentUser = .mock
+        return state
     }
 }

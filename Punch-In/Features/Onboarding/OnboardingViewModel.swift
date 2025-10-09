@@ -31,6 +31,8 @@ final class OnboardingViewModel: ObservableObject {
     @Published var isSaving = false
     @Published var errorMessage: String?
     @Published var didSave = false
+    @Published var upcomingProjects: [ProfileSpotlight] = []
+    @Published var upcomingEvents: [ProfileSpotlight] = []
     @Published var selectedPrimaryOptions: [String] = [] {
         didSet {
             if selectedAccountType == .artist || selectedAccountType == .engineer {
@@ -38,6 +40,8 @@ final class OnboardingViewModel: ObservableObject {
             }
         }
     }
+
+    let maxSpotlightsPerCategory = 3
 
     private let appState: AppState
     private let firestoreService: any FirestoreService
@@ -56,6 +60,9 @@ final class OnboardingViewModel: ObservableObject {
             fieldOne = profile.profileDetails.fieldOne
             fieldTwo = profile.profileDetails.fieldTwo
             publicBio = profile.profileDetails.bio
+            let now = Date()
+            upcomingProjects = profile.profileDetails.upcomingProjects.sanitized(referenceDate: now)
+            upcomingEvents = profile.profileDetails.upcomingEvents.sanitized(referenceDate: now)
         }
 
         syncPrimaryOptionsFromStoredValue()
@@ -108,8 +115,12 @@ final class OnboardingViewModel: ObservableObject {
         updatedProfile.profileDetails = AccountProfileDetails(
             bio: publicBio.trimmed,
             fieldOne: primaryValue,
-            fieldTwo: fieldTwo.trimmed
+            fieldTwo: fieldTwo.trimmed,
+            upcomingProjects: upcomingProjects.sanitized(),
+            upcomingEvents: upcomingEvents.sanitized()
         )
+        upcomingProjects = updatedProfile.profileDetails.upcomingProjects
+        upcomingEvents = updatedProfile.profileDetails.upcomingEvents
 
         var resolvedProfileImageURL = existingProfile.profileImageURL
 
@@ -206,5 +217,34 @@ final class OnboardingViewModel: ObservableObject {
 
     private func profileImagePath(for userId: String) -> String {
         "users/\(userId)/profile/avatar.jpg"
+    }
+
+    func addSpotlight(for category: ProfileSpotlight.Category) {
+        switch category {
+        case .project:
+            guard upcomingProjects.count < maxSpotlightsPerCategory else { return }
+            upcomingProjects.append(ProfileSpotlight(category: .project))
+        case .event:
+            guard upcomingEvents.count < maxSpotlightsPerCategory else { return }
+            upcomingEvents.append(ProfileSpotlight(category: .event, scheduledAt: Date()))
+        }
+    }
+
+    func removeSpotlight(id: String, category: ProfileSpotlight.Category) {
+        switch category {
+        case .project:
+            upcomingProjects.removeAll { $0.id == id }
+        case .event:
+            upcomingEvents.removeAll { $0.id == id }
+        }
+    }
+
+    func canAddSpotlight(for category: ProfileSpotlight.Category) -> Bool {
+        switch category {
+        case .project:
+            return upcomingProjects.count < maxSpotlightsPerCategory
+        case .event:
+            return upcomingEvents.count < maxSpotlightsPerCategory
+        }
     }
 }

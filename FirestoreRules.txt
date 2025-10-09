@@ -380,6 +380,30 @@ service cloud.firestore {
       allow read: if request.auth != null;
       allow write: if request.auth != null && request.auth.uid == userId;
 
+      match /followers/{followerId} {
+        allow read: if isSignedIn();
+        allow create: if isSignedIn()
+            && request.auth.uid == followerId
+            && request.resource.data.keys().hasOnly(['createdAt', 'followerId', 'followedId'])
+            && request.resource.data.followerId == request.auth.uid
+            && request.resource.data.followedId == userId
+            && request.resource.data.createdAt == request.time;
+        allow delete: if isSignedIn() && (request.auth.uid == followerId || request.auth.uid == userId);
+        allow update: if false;
+      }
+
+      match /following/{followedId} {
+        allow read: if isSignedIn();
+        allow create: if isSignedIn()
+            && request.auth.uid == userId
+            && request.resource.data.keys().hasOnly(['createdAt', 'followerId', 'followedId'])
+            && request.resource.data.followerId == request.auth.uid
+            && request.resource.data.followedId == followedId
+            && request.resource.data.createdAt == request.time;
+        allow delete: if isSignedIn() && request.auth.uid == userId;
+        allow update: if false;
+      }
+
       match /availability/{entryId} {
         allow read: if request.auth != null;
         allow create, update, delete: if request.auth != null && request.auth.uid == userId;

@@ -7,6 +7,7 @@ struct ChatDetailView: View {
     @StateObject private var viewModel: ChatDetailViewModel
     @State private var selectedPhotoItem: PhotosPickerItem?
     @State private var isShowingGroupSettings = false
+    @State private var selectedParticipant: ChatParticipant?
     @State private var presentedError: String?
 
     init(viewModel: ChatDetailViewModel) {
@@ -17,7 +18,10 @@ struct ChatDetailView: View {
         VStack(spacing: 0) {
             MessageListView(
                 messages: viewModel.sortedMessages,
-                currentUserId: viewModel.currentUserParticipant?.id
+                currentUserId: viewModel.currentUserParticipant?.id,
+                onParticipantSelected: { participant in
+                    selectedParticipant = participant
+                }
             )
 
             Divider()
@@ -44,12 +48,29 @@ struct ChatDetailView: View {
                         Image(systemName: "person.3")
                     }
                 }
+            } else if let participant = otherParticipants.first {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        selectedParticipant = participant
+                    } label: {
+                        Image(systemName: "person.crop.circle")
+                    }
+                    .accessibilityLabel("View participant profile")
+                }
             }
         }
         .background(Color(uiColor: .systemGroupedBackground))
         .sheet(isPresented: $isShowingGroupSettings) {
-            GroupSettingsSheet(isPresented: $isShowingGroupSettings, viewModel: viewModel)
+            GroupSettingsSheet(
+                isPresented: $isShowingGroupSettings,
+                viewModel: viewModel
+            )
                 .presentationDetents([.medium, .large])
+        }
+        .sheet(item: $selectedParticipant) { participant in
+            NavigationStack {
+                ParticipantDetailContainer(participant: participant)
+            }
         }
         .onChange(of: selectedPhotoItem) { _, newValue in
             guard let newValue else { return }
@@ -82,11 +103,20 @@ struct ChatDetailView: View {
             selectedPhotoItem = nil
         }
     }
+
+    private var otherParticipants: [ChatParticipant] {
+        let currentId = viewModel.currentUserParticipant?.id
+        return viewModel.thread.participants.filter { participant in
+            guard let currentId else { return true }
+            return participant.id != currentId
+        }
+    }
 }
 
 private struct MessageListView: View {
     let messages: [ChatMessage]
     let currentUserId: String?
+    let onParticipantSelected: (ChatParticipant) -> Void
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -96,7 +126,8 @@ private struct MessageListView: View {
                         MessageBubble(
                             message: message,
                             isCurrentUser: message.sender.id == currentUserId,
-                            showSender: showSender(for: message)
+                            showSender: showSender(for: message),
+                            onSenderTapped: onParticipantSelected
                         )
                         .id(message.id)
                     }
@@ -133,13 +164,20 @@ private struct MessageBubble: View {
     let message: ChatMessage
     let isCurrentUser: Bool
     let showSender: Bool
+    let onSenderTapped: (ChatParticipant) -> Void
 
     var body: some View {
         VStack(alignment: isCurrentUser ? .trailing : .leading, spacing: 6) {
             if showSender {
-                Text(message.sender.displayName)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Button {
+                    onSenderTapped(message.sender)
+                } label: {
+                    Text(message.sender.displayName)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .underline()
+                }
+                .buttonStyle(.plain)
             }
 
             bubbleContent
@@ -289,10 +327,15 @@ private struct GroupSettingsSheet: View {
             Form {
                 Section(header: Text("Participants")) {
                     ForEach(viewModel.thread.participants) { participant in
-                        ParticipantRow(
-                            participant: participant,
-                            isCurrentUser: participant.id == viewModel.currentUserParticipant?.id
-                        )
+                        NavigationLink {
+                            ParticipantDetailContainer(participant: participant)
+                        } label: {
+                            ParticipantRow(
+                                participant: participant,
+                                isCurrentUser: participant.id == viewModel.currentUserParticipant?.id,
+                                showsNavigationIndicator: true
+                            )
+                        }
                     }
                 }
 
@@ -431,6 +474,7 @@ private struct GroupPhotoPreview: View {
 private struct ParticipantRow: View {
     let participant: ChatParticipant
     let isCurrentUser: Bool
+    var showsNavigationIndicator: Bool = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -448,6 +492,14 @@ private struct ParticipantRow: View {
                         .foregroundStyle(.secondary)
                 }
             }
+
+            Spacer()
+
+            if showsNavigationIndicator {
+                Image(systemName: "chevron.right")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 4)
@@ -464,6 +516,187 @@ private struct ParticipantRow: View {
         case .studio:
             return "building.2"
         }
+    }
+}
+
+@MainActor
+private struct ParticipantDetailContainer: View {
+    let participant: ChatParticipant
+
+    var body: some View {
+        switch participant.kind {
+        case let .user(profile):
+            userDestination(for: profile)
+        case let .studio(studio):
+            ChatStudioDetailHost(studio: studio)
+        }
+    }
+
+    @ViewBuilder
+    private func userDestination(for profile: UserProfile) -> some View {
+        switch profile.accountType {
+        case .artist:
+            ArtistDetailView(artistId: profile.id, profile: profile)
+        case .engineer:
+            EngineerDetailView(engineerId: profile.id, profile: profile)
+        case .studioOwner:
+            StudioOwnerProfileSummaryView(profile: profile)
+        }
+    }
+}
+
+private struct StudioOwnerProfileSummaryView: View {
+    let profile: UserProfile
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: Theme.spacingLarge) {
+                avatar
+                    .font(.system(size: 48, weight: .medium))
+                    .foregroundStyle(Theme.primaryColor)
+
+                VStack(spacing: Theme.spacingSmall) {
+                    Text(displayName)
+                        .font(.title3.weight(.semibold))
+                    Text("This studio owner hasn’t listed a public studio yet.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+
+                if profile.profileDetails.bio.isEmpty == false {
+                    VStack(alignment: .leading, spacing: Theme.spacingSmall) {
+                        Text("About")
+                            .font(.headline)
+                        Text(profile.profileDetails.bio)
+                            .font(.body)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+                    .background(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .fill(Theme.cardBackground)
+                    )
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(Theme.spacingLarge)
+        }
+        .background(Color(uiColor: .systemGroupedBackground))
+        .navigationTitle(displayName)
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var displayName: String {
+        let raw = profile.displayName.isEmpty ? profile.username : profile.displayName
+        return raw.isEmpty ? "Studio Owner" : raw
+    }
+
+    @ViewBuilder
+    private var avatar: some View {
+        if let url = profile.profileImageURL {
+            AsyncImage(url: url) { phase in
+                switch phase {
+                case let .success(image):
+                    image
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 72, height: 72)
+                        .clipShape(Circle())
+                case .empty:
+                    ProgressView()
+                case .failure:
+                    initialsView
+                @unknown default:
+                    initialsView
+                }
+            }
+        } else {
+            initialsView
+        }
+    }
+
+    private var initialsView: some View {
+        Circle()
+            .fill(
+                LinearGradient(
+                    colors: [Theme.primaryGradientStart, Theme.primaryGradientEnd],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
+            .frame(width: 72, height: 72)
+            .overlay {
+                Text(initials)
+                    .font(.headline.weight(.bold))
+                    .foregroundStyle(.white)
+            }
+    }
+
+    private var initials: String {
+        let base = profile.displayName.isEmpty ? profile.username : profile.displayName
+        let components = base.split(separator: " ")
+        if let firstChar = components.first?.first {
+            if let secondChar = components.dropFirst().first?.first {
+                return String([firstChar, secondChar]).uppercased()
+            }
+            return String(firstChar).uppercased()
+        }
+        let trimmed = base.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.count >= 2 {
+            return String(trimmed.prefix(2)).uppercased()
+        }
+        return "SO"
+    }
+}
+
+@MainActor
+private struct ChatStudioDetailHost: View {
+    @Environment(\.di) private var di
+
+    let studio: Studio
+
+    @State private var resolvedStudio: Studio?
+    @State private var hasLoaded = false
+    @State private var loadErrorMessage: String?
+
+    var body: some View {
+        let studioToDisplay = resolvedStudio ?? studio
+
+        StudioDetailView(studio: studioToDisplay)
+            .id(studioIdentityKey(for: studioToDisplay))
+            .task {
+                await loadStudioIfNeeded()
+            }
+            .overlay(alignment: .bottom) {
+                if let message = loadErrorMessage {
+                    Text(message)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                        .padding(8)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .padding()
+                }
+            }
+    }
+
+    private func loadStudioIfNeeded() async {
+        guard hasLoaded == false else { return }
+        hasLoaded = true
+        do {
+            if let fetched = try await di.firestoreService.loadStudio(withId: studio.id) {
+                resolvedStudio = fetched
+                loadErrorMessage = nil
+            }
+        } catch {
+            loadErrorMessage = error.localizedDescription
+        }
+    }
+
+    private func studioIdentityKey(for studio: Studio) -> String {
+        let sortedEngineers = studio.approvedEngineerIds.sorted().joined(separator: ",")
+        return "\(studio.id)#\(sortedEngineers)#\(studio.name)"
     }
 }
 

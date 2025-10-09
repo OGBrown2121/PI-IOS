@@ -7,10 +7,20 @@ final class StudiosViewModel: ObservableObject {
     @Published var studios: [Studio] = []
     @Published var isLoading = false
     @Published var errorMessage: String?
+    @Published var searchQuery: String = "" {
+        didSet {
+            guard searchQuery != oldValue else { return }
+            scheduleUserSearch(for: searchQuery)
+        }
+    }
+    @Published private(set) var userResults: [UserProfile] = []
+    @Published private(set) var isSearchingUsers = false
+    @Published private(set) var userSearchError: String?
 
     private let firestoreService: any FirestoreService
     private let storageService: any StorageService
     private var studiosTask: Task<Void, Never>?
+    private var userSearchTask: Task<Void, Never>?
 
     init(firestoreService: any FirestoreService, storageService: any StorageService) {
         self.firestoreService = firestoreService
@@ -19,6 +29,7 @@ final class StudiosViewModel: ObservableObject {
 
     deinit {
         studiosTask?.cancel()
+        userSearchTask?.cancel()
     }
 
     func listenForStudios() {
@@ -61,6 +72,46 @@ final class StudiosViewModel: ObservableObject {
             isLoading = false
             return false
         }
+    }
+
+    func resetSearch() {
+        searchQuery = ""
+        userResults = []
+        userSearchError = nil
+        isSearchingUsers = false
+    }
+
+    private func scheduleUserSearch(for query: String) {
+        userSearchTask?.cancel()
+
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 2 else {
+            userResults = []
+            userSearchError = nil
+            isSearchingUsers = false
+            return
+        }
+
+        userSearchTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard Task.isCancelled == false else { return }
+            await self?.performUserSearch(query: trimmed)
+        }
+    }
+
+    private func performUserSearch(query: String) async {
+        isSearchingUsers = true
+        userSearchError = nil
+
+        do {
+            let results = try await firestoreService.searchUserProfiles(matching: query, limit: 20)
+            userResults = results
+        } catch {
+            userResults = []
+            userSearchError = error.localizedDescription
+        }
+
+        isSearchingUsers = false
     }
 
     func saveStudio(

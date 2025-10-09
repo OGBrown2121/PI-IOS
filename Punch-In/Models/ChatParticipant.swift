@@ -64,7 +64,16 @@ struct ChatParticipant: Identifiable, Equatable, Hashable {
     var searchableKeywords: [String] {
         switch kind {
         case let .user(profile):
-            return [profile.displayName, profile.username, profile.profileDetails.bio, profile.profileDetails.fieldOne, profile.profileDetails.fieldTwo]
+            let showcaseKeywords = (
+                profile.profileDetails.upcomingProjects + profile.profileDetails.upcomingEvents
+            ).flatMap { item -> [String] in
+                [
+                    item.title,
+                    item.detail,
+                    item.location
+                ]
+            }
+            return [profile.displayName, profile.username, profile.profileDetails.bio, profile.profileDetails.fieldOne, profile.profileDetails.fieldTwo] + showcaseKeywords
         case let .studio(studio):
             return [studio.name, studio.city, studio.address] + studio.amenities
         }

@@ -40,8 +40,8 @@ struct AppRouter: View {
 private struct MainTabView: View {
     @Environment(\.di) private var di
     @EnvironmentObject private var appState: AppState
-    @State private var selectedTab: Tab = .studios
-    @State private var studiosPath = NavigationPath()
+    @State private var selectedTab: Tab = .discovery
+    @State private var discoveryPath = NavigationPath()
     @State private var chatPath = NavigationPath()
     @State private var bookPath = NavigationPath()
     @State private var settingsPath = NavigationPath()
@@ -72,8 +72,8 @@ private struct MainTabView: View {
     @ViewBuilder
     private func content(for tab: Tab) -> some View {
         switch tab {
-        case .studios:
-            NavigationStack(path: $studiosPath) {
+        case .discovery:
+            NavigationStack(path: $discoveryPath) {
                 StudioListView(viewModel: StudiosViewModel(
                     firestoreService: di.firestoreService,
                     storageService: di.storageService
@@ -106,11 +106,11 @@ private struct MainTabView: View {
     }
 
     fileprivate enum Tab: String, CaseIterable, Hashable {
-        case studios, chat, book, settings
+        case discovery, chat, book, settings
 
         var title: String {
             switch self {
-            case .studios: return "Studios"
+            case .discovery: return "Discovery"
             case .chat: return "Chat"
             case .book: return "Book"
             case .settings: return "Settings"
@@ -119,7 +119,7 @@ private struct MainTabView: View {
 
         var icon: String {
             switch self {
-            case .studios: return "building.2"
+            case .discovery: return "sparkle.magnifyingglass"
             case .chat: return "bubble.left.and.bubble.right"
             case .book: return "calendar"
             case .settings: return "gear"

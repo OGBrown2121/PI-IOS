@@ -27,6 +27,7 @@ enum FirestoreServiceError: LocalizedError {
 /// Provides access to Firestore-backed data models.
 protocol FirestoreService {
     func fetchStudios() async throws -> [Studio]
+    func loadStudio(withId studioId: String) async throws -> Studio?
     func observeStudios() -> AsyncThrowingStream<[Studio], Error>
     func upsertStudio(_ studio: Studio) async throws
 
@@ -43,6 +44,10 @@ protocol FirestoreService {
     ) async throws
     func fetchEngineerRequests(studioId: String) async throws -> [StudioEngineerRequest]
     func fetchUserProfiles(for userIDs: [String]) async throws -> [UserProfile]
+    func searchUserProfiles(matching query: String, limit: Int) async throws -> [UserProfile]
+    func loadFollowStats(for userId: String, viewerId: String?) async throws -> FollowStats
+    func follow(userId: String, targetUserId: String) async throws
+    func unfollow(userId: String, targetUserId: String) async throws
 
     func fetchRooms(for studioId: String) async throws -> [Room]
     func upsertRoom(_ room: Room) async throws
@@ -71,6 +76,12 @@ struct FirebaseFirestoreService: FirestoreService {
     func fetchStudios() async throws -> [Studio] {
         let snapshot = try await database.collection("studios").getDocuments()
         return snapshot.documents.map { decodeStudio(documentID: $0.documentID, data: $0.data()) }
+    }
+
+    func loadStudio(withId studioId: String) async throws -> Studio? {
+        let snapshot = try await database.collection("studios").document(studioId).getDocument()
+        guard let data = snapshot.data() else { return nil }
+        return decodeStudio(documentID: snapshot.documentID, data: data)
     }
 
     func observeStudios() -> AsyncThrowingStream<[Studio], Error> {
@@ -141,14 +152,24 @@ struct FirebaseFirestoreService: FirestoreService {
             "username": profile.username,
             "displayName": profile.displayName,
             "createdAt": Timestamp(date: profile.createdAt),
-            "accountType": profile.accountType.rawValue
+            "accountType": profile.accountType.rawValue,
+            "usernameLowercase": profile.username.lowercased(),
+            "displayNameLowercase": profile.displayName.lowercased()
         ]
 
-        data["profileDetails"] = [
+        let sanitizedProjects = profile.profileDetails.upcomingProjects.sanitized()
+        let sanitizedEvents = profile.profileDetails.upcomingEvents.sanitized()
+
+        var profileDetailsPayload: [String: Any] = [
             "bio": profile.profileDetails.bio,
             "fieldOne": profile.profileDetails.fieldOne,
             "fieldTwo": profile.profileDetails.fieldTwo
         ]
+
+        profileDetailsPayload["upcomingProjects"] = sanitizedProjects.map(encodeProfileSpotlight)
+        profileDetailsPayload["upcomingEvents"] = sanitizedEvents.map(encodeProfileSpotlight)
+
+        data["profileDetails"] = profileDetailsPayload
 
         data["contact"] = [
             "email": profile.contact.email,
@@ -323,6 +344,179 @@ struct FirebaseFirestoreService: FirestoreService {
             guard let rightIndex = ordering.firstIndex(of: rhs.id) else { return true }
             return leftIndex < rightIndex
         }
+    }
+
+    func searchUserProfiles(matching query: String, limit: Int = 12) async throws -> [UserProfile] {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedQuery.count >= 2 else { return [] }
+
+        let lowercaseQuery = trimmedQuery.lowercased()
+        let upperBound = lowercaseQuery + "\u{f8ff}"
+
+        let usersCollection = database.collection("users")
+
+        async let usernameSnapshot = usersCollection
+            .order(by: "usernameLowercase")
+            .start(at: [lowercaseQuery])
+            .end(at: [upperBound])
+            .limit(to: limit)
+            .getDocuments()
+
+        async let displayNameSnapshot = usersCollection
+            .order(by: "displayNameLowercase")
+            .start(at: [lowercaseQuery])
+            .end(at: [upperBound])
+            .limit(to: limit)
+            .getDocuments()
+
+        let (usernameDocs, displayNameDocs) = try await (usernameSnapshot, displayNameSnapshot)
+
+        func appendProfiles(from documents: [QueryDocumentSnapshot], into storage: inout [UserProfile]) {
+            for document in documents {
+                let profile = decodeUserProfile(id: document.documentID, data: document.data())
+                guard storage.contains(where: { $0.id == profile.id }) == false else { continue }
+                storage.append(profile)
+            }
+        }
+
+        var combined: [UserProfile] = []
+        appendProfiles(from: usernameDocs.documents, into: &combined)
+        appendProfiles(from: displayNameDocs.documents, into: &combined)
+
+        let filtered = combined.filter { profile in
+            profile.username.lowercased().contains(lowercaseQuery)
+                || profile.displayName.lowercased().contains(lowercaseQuery)
+        }
+
+        if filtered.isEmpty {
+            let legacyUpperBound = trimmedQuery + "\u{f8ff}"
+            let legacyUsernameDocs = try await usersCollection
+                .order(by: "username")
+                .start(at: [trimmedQuery])
+                .end(at: [legacyUpperBound])
+                .limit(to: limit)
+                .getDocuments()
+
+            let legacyDisplayNameDocs = try await usersCollection
+                .order(by: "displayName")
+                .start(at: [trimmedQuery])
+                .end(at: [legacyUpperBound])
+                .limit(to: limit)
+                .getDocuments()
+
+            var legacyCombined: [UserProfile] = []
+            appendProfiles(from: legacyUsernameDocs.documents, into: &legacyCombined)
+            appendProfiles(from: legacyDisplayNameDocs.documents, into: &legacyCombined)
+
+            let legacyFiltered = legacyCombined.filter { profile in
+                profile.username.lowercased().contains(lowercaseQuery)
+                    || profile.displayName.lowercased().contains(lowercaseQuery)
+            }
+
+            return Array(legacyFiltered.prefix(limit))
+        }
+
+        return Array(filtered.prefix(limit))
+    }
+
+    func loadFollowStats(for userId: String, viewerId: String?) async throws -> FollowStats {
+        let userRef = database.collection("users").document(userId)
+
+        async let followersSnapshot = userRef
+            .collection("followers")
+            .getDocuments()
+
+        async let followingSnapshot = userRef
+            .collection("following")
+            .getDocuments()
+
+        if let viewerId, viewerId != userId {
+            async let viewerFollowingDoc = database
+                .collection("users")
+                .document(viewerId)
+                .collection("following")
+                .document(userId)
+                .getDocument()
+
+            async let viewerFollowerDoc = database
+                .collection("users")
+                .document(viewerId)
+                .collection("followers")
+                .document(userId)
+                .getDocument()
+
+            let (followers, following, viewerFollowing, viewerFollower) = try await (
+                followersSnapshot,
+                followingSnapshot,
+                viewerFollowingDoc,
+                viewerFollowerDoc
+            )
+
+            return FollowStats(
+                followersCount: followers.documents.count,
+                followingCount: following.documents.count,
+                isFollowing: viewerFollowing.exists,
+                isFollowedBy: viewerFollower.exists
+            )
+        } else {
+            let (followers, following) = try await (followersSnapshot, followingSnapshot)
+            return FollowStats(
+                followersCount: followers.documents.count,
+                followingCount: following.documents.count,
+                isFollowing: false,
+                isFollowedBy: false
+            )
+        }
+    }
+
+    func follow(userId: String, targetUserId: String) async throws {
+        guard userId != targetUserId else { return }
+
+        let followerReference = database
+            .collection("users")
+            .document(targetUserId)
+            .collection("followers")
+            .document(userId)
+
+        let followingReference = database
+            .collection("users")
+            .document(userId)
+            .collection("following")
+            .document(targetUserId)
+
+        let batch = database.batch()
+        let payload: [String: Any] = [
+            "createdAt": FieldValue.serverTimestamp(),
+            "followerId": userId,
+            "followedId": targetUserId
+        ]
+
+        batch.setData(payload, forDocument: followerReference, merge: true)
+        batch.setData(payload, forDocument: followingReference, merge: true)
+
+        try await batch.commit()
+    }
+
+    func unfollow(userId: String, targetUserId: String) async throws {
+        guard userId != targetUserId else { return }
+
+        let followerReference = database
+            .collection("users")
+            .document(targetUserId)
+            .collection("followers")
+            .document(userId)
+
+        let followingReference = database
+            .collection("users")
+            .document(userId)
+            .collection("following")
+            .document(targetUserId)
+
+        let batch = database.batch()
+        batch.deleteDocument(followerReference)
+        batch.deleteDocument(followingReference)
+
+        try await batch.commit()
     }
 
     func fetchRooms(for studioId: String) async throws -> [Room] {
@@ -524,12 +718,6 @@ struct FirebaseFirestoreService: FirestoreService {
         let contactData = data["contact"] as? [String: Any] ?? [:]
         let engineerSettingsData = data["engineerSettings"] as? [String: Any] ?? [:]
 
-        let details = AccountProfileDetails(
-            bio: profileData["bio"] as? String ?? "",
-            fieldOne: profileData["fieldOne"] as? String ?? "",
-            fieldTwo: profileData["fieldTwo"] as? String ?? ""
-        )
-
         let contact = UserContactInfo(
             email: contactData["email"] as? String ?? "",
             phoneNumber: contactData["phoneNumber"] as? String ?? ""
@@ -544,6 +732,23 @@ struct FirebaseFirestoreService: FirestoreService {
             defaultSessionDurationMinutes: engineerSettingsData["defaultSessionDurationMinutes"] as? Int ?? 120
         )
 
+        let upcomingProjects = decodeProfileSpotlights(
+            profileData["upcomingProjects"],
+            defaultCategory: .project
+        )
+        let upcomingEvents = decodeProfileSpotlights(
+            profileData["upcomingEvents"],
+            defaultCategory: .event
+        )
+
+        let details = AccountProfileDetails(
+            bio: profileData["bio"] as? String ?? "",
+            fieldOne: profileData["fieldOne"] as? String ?? "",
+            fieldTwo: profileData["fieldTwo"] as? String ?? "",
+            upcomingProjects: upcomingProjects.sanitized(),
+            upcomingEvents: upcomingEvents.sanitized()
+        )
+
         return UserProfile(
             id: id,
             username: username,
@@ -555,6 +760,59 @@ struct FirebaseFirestoreService: FirestoreService {
             contact: contact,
             engineerSettings: engineerSettings
         )
+    }
+
+    private func encodeProfileSpotlight(_ item: ProfileSpotlight) -> [String: Any] {
+        var payload: [String: Any] = [
+            "id": item.id,
+            "category": item.category.rawValue,
+            "title": item.title,
+            "detail": item.detail,
+            "location": item.location,
+            "callToActionTitle": item.callToActionTitle
+        ]
+
+        if let scheduledAt = item.scheduledAt {
+            payload["scheduledAt"] = Timestamp(date: scheduledAt)
+        }
+
+        if let url = item.callToActionURL?.absoluteString {
+            payload["callToActionURL"] = url
+        }
+
+        return payload
+    }
+
+    private func decodeProfileSpotlights(
+        _ raw: Any?,
+        defaultCategory: ProfileSpotlight.Category
+    ) -> [ProfileSpotlight] {
+        guard let array = raw as? [[String: Any]] else { return [] }
+
+        return array.compactMap { entry in
+            let id = entry["id"] as? String ?? UUID().uuidString
+            let categoryRaw = entry["category"] as? String ?? defaultCategory.rawValue
+            let category = ProfileSpotlight.Category(rawValue: categoryRaw) ?? defaultCategory
+            let title = entry["title"] as? String ?? ""
+            let detail = entry["detail"] as? String ?? ""
+            let location = entry["location"] as? String ?? ""
+            let actionTitle = entry["callToActionTitle"] as? String ?? ""
+            let actionURLString = entry["callToActionURL"] as? String
+            let actionURL = actionURLString.flatMap(URL.init(string:))
+            let timestamp = entry["scheduledAt"] as? Timestamp
+            let scheduledAt = timestamp?.dateValue()
+
+            return ProfileSpotlight(
+                id: id,
+                category: category,
+                title: title,
+                detail: detail,
+                scheduledAt: scheduledAt,
+                location: location,
+                callToActionTitle: actionTitle,
+                callToActionURL: actionURL
+            )
+        }
     }
 
     private func decodeStudio(documentID: String, data: [String: Any]) -> Studio {
@@ -926,9 +1184,15 @@ final class MockFirestoreService: FirestoreService {
     private var engineerAvailabilityStore: [String: [AvailabilityEntry]] = [:]
     private var bookingsStore: [String: Booking] = [:]
     private var reviewsStore: [String: Review] = [:]
+    private var followingByUser: [String: Set<String>] = [:]
+    private var followersByUser: [String: Set<String>] = [:]
 
     func fetchStudios() async throws -> [Studio] {
         storedStudios
+    }
+
+    func loadStudio(withId studioId: String) async throws -> Studio? {
+        storedStudios.first { $0.id == studioId }
     }
 
     func observeStudios() -> AsyncThrowingStream<[Studio], Error> {
@@ -1041,6 +1305,70 @@ final class MockFirestoreService: FirestoreService {
 
     func fetchUserProfiles(for userIDs: [String]) async throws -> [UserProfile] {
         userIDs.compactMap { storedProfiles[$0] }
+    }
+
+    func searchUserProfiles(matching query: String, limit: Int = 12) async throws -> [UserProfile] {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedQuery.count >= 2 else { return [] }
+
+        let lowercaseQuery = trimmedQuery.lowercased()
+
+        let results = storedProfiles.values.filter { profile in
+            profile.username.lowercased().contains(lowercaseQuery)
+                || profile.displayName.lowercased().contains(lowercaseQuery)
+        }
+        .sorted { lhs, rhs in
+            lhs.displayName.lowercased() < rhs.displayName.lowercased()
+        }
+
+        return Array(results.prefix(limit))
+    }
+
+    func loadFollowStats(for userId: String, viewerId: String?) async throws -> FollowStats {
+        let followers = followersByUser[userId] ?? Set<String>()
+        let following = followingByUser[userId] ?? Set<String>()
+
+        let isFollowing: Bool
+        let isFollowedBy: Bool
+
+        if let viewerId {
+            isFollowing = followers.contains(viewerId)
+            isFollowedBy = (followersByUser[viewerId] ?? Set<String>()).contains(userId)
+        } else {
+            isFollowing = false
+            isFollowedBy = false
+        }
+
+        return FollowStats(
+            followersCount: followers.count,
+            followingCount: following.count,
+            isFollowing: isFollowing,
+            isFollowedBy: isFollowedBy
+        )
+    }
+
+    func follow(userId: String, targetUserId: String) async throws {
+        guard userId != targetUserId else { return }
+
+        var following = followingByUser[userId] ?? Set<String>()
+        following.insert(targetUserId)
+        followingByUser[userId] = following
+
+        var followers = followersByUser[targetUserId] ?? Set<String>()
+        followers.insert(userId)
+        followersByUser[targetUserId] = followers
+    }
+
+    func unfollow(userId: String, targetUserId: String) async throws {
+        guard userId != targetUserId else { return }
+
+        var following = followingByUser[userId] ?? Set<String>()
+        following.remove(targetUserId)
+        followingByUser[userId] = following
+
+        var followers = followersByUser[targetUserId] ?? Set<String>()
+        followers.remove(userId)
+        followersByUser[targetUserId] = followers
     }
 
     func fetchRooms(for studioId: String) async throws -> [Room] {

@@ -4,6 +4,7 @@ struct StudioListView: View {
     @StateObject private var viewModel: StudiosViewModel
     @State private var toastMessage: String?
     @State private var toastDismissTask: Task<Void, Never>?
+    @FocusState private var isSearchFocused: Bool
 
     init(viewModel: StudiosViewModel) {
         _viewModel = StateObject(wrappedValue: viewModel)
@@ -13,6 +14,8 @@ struct StudioListView: View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(alignment: .leading, spacing: Theme.spacingLarge) {
                 heroBanner
+
+                userSearchSection
 
                 studiosSection
             }
@@ -39,14 +42,123 @@ struct StudioListView: View {
                 .shadow(color: Theme.primaryColor.opacity(0.2), radius: 16, x: 0, y: 12)
 
             VStack(alignment: .leading, spacing: Theme.spacingSmall) {
-                Text("PunchIn Studios")
+                Text("Discovery Hub")
                     .font(.title.weight(.heavy))
-                Text("Find the perfect space, vibe, and engineering support for your next session.")
+                Text("Explore studios and discover artists or engineers to collaborate with.")
                     .font(.subheadline)
                     .foregroundStyle(.white.opacity(0.9))
             }
             .padding(Theme.spacingLarge)
             .foregroundStyle(.white)
+        }
+    }
+
+    private var userSearchSection: some View {
+        VStack(alignment: .leading, spacing: Theme.spacingMedium) {
+            Text("Find collaborators")
+                .font(.headline.weight(.semibold))
+
+            userSearchField
+
+            if viewModel.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).count < 2 {
+                Text("Type at least two characters to search by username or display name.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else if viewModel.isSearchingUsers {
+                HStack(spacing: Theme.spacingSmall) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Searching users…")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            } else if let message = viewModel.userSearchError {
+                Text(message)
+                    .font(.footnote)
+                    .foregroundStyle(Color.red)
+            } else if viewModel.userResults.isEmpty {
+                Text("No matching users yet. Try a different name or handle.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(Array(viewModel.userResults.enumerated()), id: \.element.id) { index, profile in
+                        NavigationLink {
+                            profileDestination(for: profile)
+                        } label: {
+                            UserSearchRow(profile: profile)
+                        }
+                        .buttonStyle(.plain)
+
+                        if index < viewModel.userResults.count - 1 {
+                            Divider()
+                                .padding(.leading, 56)
+                        }
+                    }
+                }
+                .padding(.top, Theme.spacingSmall)
+            }
+        }
+        .padding(Theme.spacingLarge)
+        .background(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(Theme.cardBackground)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(Theme.primaryColor.opacity(0.12), lineWidth: 1)
+        )
+    }
+
+    private var userSearchField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+
+            TextField("Search people", text: $viewModel.searchQuery)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled(true)
+                .focused($isSearchFocused)
+                .submitLabel(.search)
+
+            if viewModel.isSearchingUsers {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .scaleEffect(0.75)
+            } else if viewModel.searchQuery.isEmpty == false {
+                Button {
+                    viewModel.resetSearch()
+                    isSearchFocused = false
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(Color.secondary)
+                        .font(.system(size: 16, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear search")
+            }
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color(uiColor: .secondarySystemBackground))
+        )
+    }
+
+    @ViewBuilder
+    private func profileDestination(for profile: UserProfile) -> some View {
+        switch profile.accountType {
+        case .artist:
+            ArtistDetailView(artistId: profile.id, profile: profile)
+        case .engineer:
+            EngineerDetailView(engineerId: profile.id, profile: profile)
+        case .studioOwner:
+            if let studio = viewModel.studios.first(where: { $0.ownerId == profile.id }) {
+                StudioDetailView(studio: studio)
+            } else {
+                StudioOwnerProfilePlaceholder(profile: profile)
+            }
         }
     }
 
@@ -291,5 +403,117 @@ private struct StudioCard: View {
                 Capsule()
                     .fill(Color.white.opacity(0.15))
             )
+    }
+}
+
+private struct UserSearchRow: View {
+    let profile: UserProfile
+
+    var body: some View {
+        HStack(spacing: Theme.spacingMedium) {
+            avatar
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(profile.displayName.isEmpty ? profile.username : profile.displayName)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+
+                Text("@\(profile.username)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Text(profile.accountType.title)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(Theme.primaryColor.opacity(0.9))
+            }
+
+            Spacer(minLength: 0)
+
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.bold))
+                .foregroundStyle(Color(.tertiaryLabel))
+        }
+        .padding(.vertical, 10)
+    }
+
+    private var avatar: some View {
+        avatarContent
+            .frame(width: 44, height: 44)
+            .clipShape(Circle())
+            .overlay(
+                Circle()
+                    .stroke(Color.white.opacity(0.6), lineWidth: 1)
+            )
+            .shadow(color: Color.black.opacity(0.12), radius: 4, y: 2)
+    }
+
+    @ViewBuilder
+    private var avatarContent: some View {
+        if let imageURL = profile.profileImageURL {
+            AsyncImage(url: imageURL) { phase in
+                switch phase {
+                case .empty:
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                case .success(let image):
+                    image
+                        .resizable()
+                        .scaledToFill()
+                case .failure:
+                    placeholder
+                @unknown default:
+                    placeholder
+                }
+            }
+        } else {
+            placeholder
+        }
+    }
+
+    private var placeholder: some View {
+        Circle()
+            .fill(LinearGradient(colors: [Theme.primaryGradientStart, Theme.primaryGradientEnd], startPoint: .topLeading, endPoint: .bottomTrailing))
+            .overlay {
+                Text(initials)
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.white)
+            }
+    }
+
+    private var initials: String {
+        let base = profile.displayName.isEmpty ? profile.username : profile.displayName
+        let components = base.split(separator: " ")
+        if let first = components.first, let second = components.dropFirst().first, let firstChar = first.first, let secondChar = second.first {
+            return String(firstChar).uppercased() + String(secondChar).uppercased()
+        }
+        return String(base.prefix(2)).uppercased()
+    }
+}
+
+private struct StudioOwnerProfilePlaceholder: View {
+    let profile: UserProfile
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: Theme.spacingLarge) {
+                Image(systemName: "building.2.crop.circle")
+                    .font(.system(size: 48, weight: .regular))
+                    .foregroundStyle(Theme.primaryColor)
+
+                VStack(spacing: Theme.spacingSmall) {
+                    Text(profile.displayName.isEmpty ? profile.username : profile.displayName)
+                        .font(.title3.weight(.semibold))
+                    Text("This studio owner hasn’t listed a public studio yet.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(Theme.spacingLarge)
+        }
+        .background(Color(uiColor: .systemGroupedBackground))
+        .navigationTitle(profile.displayName.isEmpty ? profile.username : profile.displayName)
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
