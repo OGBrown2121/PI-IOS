@@ -33,6 +33,14 @@ protocol FirestoreService {
 
     func loadUserProfile(for userID: String) async throws -> UserProfile?
     func saveUserProfile(_ profile: UserProfile) async throws
+    func fetchProfileMedia(for ownerId: String) async throws -> [ProfileMediaItem]
+    func loadProfileMedia(ownerId: String, mediaId: String) async throws -> ProfileMediaItem?
+    func submitMediaRating(ownerId: String, mediaId: String, reviewerId: String, rating: Int) async throws
+    func deleteMediaRating(ownerId: String, mediaId: String, reviewerId: String) async throws
+    func incrementMediaPlayCount(ownerId: String, mediaId: String) async throws
+    func upsertProfileMedia(_ media: ProfileMediaItem) async throws
+    func deleteProfileMedia(ownerId: String, mediaId: String) async throws
+    func reorderProfileMediaPins(ownerId: String, orderedPinnedIds: [String]) async throws
 
     func fetchEngineerRequest(studioId: String, engineerId: String) async throws -> StudioEngineerRequest?
     func submitEngineerRequest(studioId: String, studioOwnerId: String, engineerId: String) async throws
@@ -46,8 +54,11 @@ protocol FirestoreService {
     func fetchUserProfiles(for userIDs: [String]) async throws -> [UserProfile]
     func searchUserProfiles(matching query: String, limit: Int) async throws -> [UserProfile]
     func loadFollowStats(for userId: String, viewerId: String?) async throws -> FollowStats
+    func fetchFollowers(for userId: String) async throws -> [UserProfile]
+    func fetchFollowing(for userId: String) async throws -> [UserProfile]
     func follow(userId: String, targetUserId: String) async throws
     func unfollow(userId: String, targetUserId: String) async throws
+    func submitUserReport(_ report: UserReport) async throws
 
     func fetchRooms(for studioId: String) async throws -> [Room]
     func upsertRoom(_ room: Room) async throws
@@ -57,6 +68,7 @@ protocol FirestoreService {
     func upsertAvailability(scope: AvailabilityScope, entry: AvailabilityEntry) async throws
     func deleteAvailability(scope: AvailabilityScope, ownerId: String, entryId: String) async throws
 
+    func loadBooking(withId id: String) async throws -> Booking?
     func fetchBookings(for participantId: String, role: BookingParticipantRole) async throws -> [Booking]
     func createBooking(_ booking: Booking) async throws
     func updateBooking(_ booking: Booking) async throws
@@ -200,6 +212,136 @@ struct FirebaseFirestoreService: FirestoreService {
         }
 
         try await database.collection("users").document(profile.id).setData(data, merge: true)
+    }
+
+    func fetchProfileMedia(for ownerId: String) async throws -> [ProfileMediaItem] {
+        let snapshot = try await database.collection("users")
+            .document(ownerId)
+            .collection("media")
+            .getDocuments()
+
+        var items: [ProfileMediaItem] = []
+        for document in snapshot.documents {
+            var item = decodeProfileMedia(
+                ownerId: ownerId,
+                documentID: document.documentID,
+                data: document.data()
+            )
+            let enrichedRatings = await loadRatingsIfNeeded(for: document.reference, currentRatings: item.ratings)
+            item.ratings = enrichedRatings
+            items.append(item)
+        }
+
+        return items.sorted { lhs, rhs in
+            switch (lhs.pinnedRank, rhs.pinnedRank) {
+            case let (lhsRank?, rhsRank?):
+                if lhsRank == rhsRank {
+                    return lhs.updatedAt > rhs.updatedAt
+                }
+                return lhsRank < rhsRank
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            default:
+                return lhs.updatedAt > rhs.updatedAt
+            }
+        }
+    }
+
+    func loadProfileMedia(ownerId: String, mediaId: String) async throws -> ProfileMediaItem? {
+        let document = try await database.collection("users")
+            .document(ownerId)
+            .collection("media")
+            .document(mediaId)
+            .getDocument()
+
+        guard let data = document.data() else { return nil }
+        var item = decodeProfileMedia(
+            ownerId: ownerId,
+            documentID: document.documentID,
+            data: data
+        )
+        item.ratings = await loadRatingsIfNeeded(for: document.reference, currentRatings: item.ratings)
+        return item
+    }
+
+    func upsertProfileMedia(_ media: ProfileMediaItem) async throws {
+        let payload = encodeProfileMedia(media)
+        try await database.collection("users")
+            .document(media.ownerId)
+            .collection("media")
+            .document(media.id)
+            .setData(payload, merge: true)
+    }
+
+    func submitMediaRating(ownerId: String, mediaId: String, reviewerId: String, rating: Int) async throws {
+        let ratingRef = database
+            .collection("users")
+            .document(ownerId)
+            .collection("media")
+            .document(mediaId)
+            .collection("ratings")
+            .document(reviewerId)
+
+        let snapshot = try await ratingRef.getDocument()
+        if snapshot.exists {
+            try await ratingRef.updateData([
+                "rating": rating,
+                "updatedAt": FieldValue.serverTimestamp()
+            ])
+        } else {
+            try await ratingRef.setData([
+                "rating": rating,
+                "createdAt": FieldValue.serverTimestamp(),
+                "updatedAt": FieldValue.serverTimestamp()
+            ])
+        }
+    }
+
+    func deleteMediaRating(ownerId: String, mediaId: String, reviewerId: String) async throws {
+        try await database
+            .collection("users")
+            .document(ownerId)
+            .collection("media")
+            .document(mediaId)
+            .collection("ratings")
+            .document(reviewerId)
+            .delete()
+    }
+
+    func incrementMediaPlayCount(ownerId: String, mediaId: String) async throws {
+        let reference = database
+            .collection("users")
+            .document(ownerId)
+            .collection("media")
+            .document(mediaId)
+
+        try await reference.updateData([
+            "playCount": FieldValue.increment(Int64(1)),
+            "updatedAt": FieldValue.serverTimestamp()
+        ])
+    }
+
+    func deleteProfileMedia(ownerId: String, mediaId: String) async throws {
+        try await database.collection("users")
+            .document(ownerId)
+            .collection("media")
+            .document(mediaId)
+            .delete()
+    }
+
+    func reorderProfileMediaPins(ownerId: String, orderedPinnedIds: [String]) async throws {
+        let batch = database.batch()
+        for (index, mediaId) in orderedPinnedIds.enumerated() {
+            let ref = database.collection("users")
+                .document(ownerId)
+                .collection("media")
+                .document(mediaId)
+            batch.setData(["pinnedRank": index], forDocument: ref, merge: true)
+        }
+
+        try await batch.commit()
     }
 
     func fetchEngineerRequest(studioId: String, engineerId: String) async throws -> StudioEngineerRequest? {
@@ -469,6 +611,42 @@ struct FirebaseFirestoreService: FirestoreService {
         }
     }
 
+    func fetchFollowers(for userId: String) async throws -> [UserProfile] {
+        let snapshot = try await database
+            .collection("users")
+            .document(userId)
+            .collection("followers")
+            .order(by: "createdAt", descending: true)
+            .getDocuments()
+
+        let followerIds = snapshot.documents.compactMap { document -> String? in
+            if let explicitId = document.data()["followerId"] as? String, explicitId.isEmpty == false {
+                return explicitId
+            }
+            return document.documentID
+        }
+
+        return try await fetchUserProfiles(for: followerIds)
+    }
+
+    func fetchFollowing(for userId: String) async throws -> [UserProfile] {
+        let snapshot = try await database
+            .collection("users")
+            .document(userId)
+            .collection("following")
+            .order(by: "createdAt", descending: true)
+            .getDocuments()
+
+        let followingIds = snapshot.documents.compactMap { document -> String? in
+            if let explicitId = document.data()["followedId"] as? String, explicitId.isEmpty == false {
+                return explicitId
+            }
+            return document.documentID
+        }
+
+        return try await fetchUserProfiles(for: followingIds)
+    }
+
     func follow(userId: String, targetUserId: String) async throws {
         guard userId != targetUserId else { return }
 
@@ -519,6 +697,26 @@ struct FirebaseFirestoreService: FirestoreService {
         try await batch.commit()
     }
 
+    func submitUserReport(_ report: UserReport) async throws {
+        var payload: [String: Any] = [
+            "reportedUserId": report.reportedUserId,
+            "reporterUserId": report.reporterUserId,
+            "reason": report.reason.rawValue,
+            "createdAt": Timestamp(date: report.createdAt)
+        ]
+
+        if report.details.isEmpty == false {
+            payload["details"] = report.details
+        }
+
+        payload["requiresFollowUp"] = report.reason.requiresDetails
+
+        try await database
+            .collection("userReports")
+            .document(report.id)
+            .setData(payload, merge: false)
+    }
+
     func fetchRooms(for studioId: String) async throws -> [Room] {
         let snapshot = try await database
             .collection("studios")
@@ -567,6 +765,12 @@ struct FirebaseFirestoreService: FirestoreService {
         let reference = availabilityCollection(scope: scope, ownerId: ownerId)
             .document(entryId)
         try await reference.delete()
+    }
+
+    func loadBooking(withId id: String) async throws -> Booking? {
+        let document = try await database.collection("bookings").document(id).getDocument()
+        guard let data = document.data() else { return nil }
+        return decodeBooking(documentID: document.documentID, data: data)
     }
 
     func fetchBookings(for participantId: String, role: BookingParticipantRole) async throws -> [Booking] {
@@ -705,6 +909,180 @@ struct FirebaseFirestoreService: FirestoreService {
             createdAt: createdAt,
             updatedAt: updatedAt
         )
+    }
+
+    private func encodeProfileMedia(_ media: ProfileMediaItem) -> [String: Any] {
+        var payload: [String: Any] = [
+            "ownerId": media.ownerId,
+            "title": media.title,
+            "caption": media.caption,
+            "format": media.format.rawValue,
+            "category": media.category.rawValue,
+            "collaborators": media.collaborators.map(encodeProfileMediaCollaborator),
+            "ratings": media.ratings,
+            "createdAt": Timestamp(date: media.createdAt),
+            "updatedAt": Timestamp(date: media.updatedAt)
+        ]
+
+        if let mediaURL = media.mediaURL?.absoluteString {
+            payload["mediaURL"] = mediaURL
+        } else {
+            payload["mediaURL"] = FieldValue.delete()
+        }
+
+        if let thumbnailURL = media.thumbnailURL?.absoluteString {
+            payload["thumbnailURL"] = thumbnailURL
+        } else {
+            payload["thumbnailURL"] = FieldValue.delete()
+        }
+
+        if let coverArtURL = media.coverArtURL?.absoluteString {
+            payload["coverArtURL"] = coverArtURL
+        } else {
+            payload["coverArtURL"] = FieldValue.delete()
+        }
+
+        if let durationSeconds = media.durationSeconds {
+            payload["durationSeconds"] = durationSeconds
+        } else {
+            payload["durationSeconds"] = FieldValue.delete()
+        }
+
+        if let fileSize = media.fileSizeBytes {
+            payload["fileSizeBytes"] = fileSize
+        } else {
+            payload["fileSizeBytes"] = FieldValue.delete()
+        }
+
+        if let pinnedRank = media.pinnedRank {
+            payload["pinnedRank"] = pinnedRank
+        } else {
+            payload["pinnedRank"] = FieldValue.delete()
+        }
+
+        payload["isShared"] = media.isShared
+
+        return payload
+    }
+
+    private func encodeProfileMediaCollaborator(_ collaborator: ProfileMediaCollaborator) -> [String: Any] {
+        var payload: [String: Any] = [
+            "id": collaborator.id,
+            "displayName": collaborator.displayName,
+            "kind": collaborator.kind.rawValue
+        ]
+
+        if let accountType = collaborator.accountType {
+            payload["accountType"] = accountType.rawValue
+        }
+
+        if let role = collaborator.role {
+            payload["role"] = role.rawValue
+        }
+
+        return payload
+    }
+
+    private func decodeProfileMedia(ownerId: String, documentID: String, data: [String: Any]) -> ProfileMediaItem {
+        let formatRaw = data["format"] as? String ?? ProfileMediaFormat.audio.rawValue
+        let categoryRaw = data["category"] as? String ?? ProfileMediaCategory.other.rawValue
+
+        let mediaURLString = data["mediaURL"] as? String
+        let thumbnailURLString = data["thumbnailURL"] as? String
+        let coverArtURLString = data["coverArtURL"] as? String
+        let collaborators = decodeProfileMediaCollaborators(data["collaborators"])
+        let pinnedRank = data["pinnedRank"] as? Int
+        let isShared = data["isShared"] as? Bool ?? true
+        let createdAt = (data["createdAt"] as? Timestamp)?.dateValue() ?? Date()
+        let updatedAt = (data["updatedAt"] as? Timestamp)?.dateValue() ?? createdAt
+        let durationSeconds = data["durationSeconds"] as? Double ?? (data["durationSeconds"] as? NSNumber)?.doubleValue
+        let ratings = decodeRatingsMap(data["ratings"])
+        let playCount = intValue(data["playCount"]) ?? 0
+
+        return ProfileMediaItem(
+            id: documentID,
+            ownerId: ownerId,
+            title: data["title"] as? String ?? "",
+            caption: data["caption"] as? String ?? "",
+            format: ProfileMediaFormat(rawValue: formatRaw) ?? .audio,
+            category: ProfileMediaCategory(rawValue: categoryRaw) ?? .other,
+            mediaURL: mediaURLString.flatMap(URL.init(string:)),
+            thumbnailURL: thumbnailURLString.flatMap(URL.init(string:)),
+            coverArtURL: coverArtURLString.flatMap(URL.init(string:)),
+            durationSeconds: durationSeconds,
+            fileSizeBytes: data["fileSizeBytes"] as? Int,
+            collaborators: collaborators,
+            playCount: playCount,
+            ratings: ratings,
+            pinnedRank: pinnedRank,
+            isShared: isShared,
+            createdAt: createdAt,
+            updatedAt: updatedAt
+        )
+    }
+
+    private func decodeRatingsMap(_ raw: Any?) -> [String: Int] {
+        guard let payload = raw as? [String: Any], payload.isEmpty == false else { return [:] }
+        return payload.reduce(into: [String: Int]()) { result, element in
+            if let value = intValue(element.value) {
+                result[element.key] = max(1, min(value, 5))
+            }
+        }
+    }
+
+    private func loadRatingsIfNeeded(for mediaRef: DocumentReference, currentRatings: [String: Int]) async -> [String: Int] {
+        guard currentRatings.isEmpty else { return currentRatings }
+        do {
+            let snapshot = try await mediaRef.collection("ratings").getDocuments()
+            guard snapshot.isEmpty == false else { return currentRatings }
+            var ratings: [String: Int] = [:]
+            for document in snapshot.documents {
+                let data = document.data()
+                if let value = intValue(data["rating"]) {
+                    ratings[document.documentID] = max(1, min(value, 5))
+                }
+            }
+            return ratings
+        } catch {
+            Logger.log("Failed to load ratings for media \(mediaRef.documentID): \(error.localizedDescription)")
+            return currentRatings
+        }
+    }
+
+    private func decodeProfileMediaCollaborators(_ raw: Any?) -> [ProfileMediaCollaborator] {
+        guard let array = raw as? [[String: Any]] else { return [] }
+        return array.compactMap { entry in
+            guard
+                let id = entry["id"] as? String,
+                let name = entry["displayName"] as? String,
+                let kindRaw = entry["kind"] as? String,
+                let kind = ProfileMediaCollaborator.Kind(rawValue: kindRaw)
+            else {
+                return nil
+            }
+
+            let accountType: AccountType?
+            if let accountRaw = entry["accountType"] as? String {
+                accountType = AccountType(rawValue: accountRaw)
+            } else {
+                accountType = nil
+            }
+
+            let role: ProfileMediaCollaborator.Role?
+            if let roleRaw = entry["role"] as? String {
+                role = ProfileMediaCollaborator.Role(rawValue: roleRaw)
+            } else {
+                role = nil
+            }
+
+            return ProfileMediaCollaborator(
+                id: id,
+                displayName: name,
+                kind: kind,
+                accountType: accountType,
+                role: role
+            )
+        }
     }
 
     private func decodeUserProfile(id: String, data: [String: Any]) -> UserProfile {
@@ -1146,6 +1524,9 @@ struct FirebaseFirestoreService: FirestoreService {
         if let intValue = raw as? Int {
             return intValue
         }
+        if let numberValue = raw as? NSNumber {
+            return numberValue.intValue
+        }
         if let doubleValue = raw as? Double {
             return Int(doubleValue)
         }
@@ -1186,6 +1567,8 @@ final class MockFirestoreService: FirestoreService {
     private var reviewsStore: [String: Review] = [:]
     private var followingByUser: [String: Set<String>] = [:]
     private var followersByUser: [String: Set<String>] = [:]
+    private var mediaLibraryStore: [String: [ProfileMediaItem]] = [:]
+    private var userReportsStore: [UserReport] = []
 
     func fetchStudios() async throws -> [Studio] {
         storedStudios
@@ -1221,6 +1604,89 @@ final class MockFirestoreService: FirestoreService {
 
     func saveUserProfile(_ profile: UserProfile) async throws {
         storedProfiles[profile.id] = profile
+    }
+
+    func fetchProfileMedia(for ownerId: String) async throws -> [ProfileMediaItem] {
+        let items = mediaLibraryStore[ownerId] ?? []
+        return items.sorted { lhs, rhs in
+            switch (lhs.pinnedRank, rhs.pinnedRank) {
+            case let (lhsRank?, rhsRank?):
+                if lhsRank == rhsRank {
+                    return lhs.updatedAt > rhs.updatedAt
+                }
+                return lhsRank < rhsRank
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            default:
+                return lhs.updatedAt > rhs.updatedAt
+            }
+        }
+    }
+
+    func loadProfileMedia(ownerId: String, mediaId: String) async throws -> ProfileMediaItem? {
+        mediaLibraryStore[ownerId]?.first { $0.id == mediaId }
+    }
+
+    func submitMediaRating(ownerId: String, mediaId: String, reviewerId: String, rating: Int) async throws {
+        guard var items = mediaLibraryStore[ownerId], let index = items.firstIndex(where: { $0.id == mediaId }) else {
+            throw FirestoreServiceError.availabilityNotFound
+        }
+        var media = items[index]
+        media.ratings[reviewerId] = rating
+        media.updatedAt = Date()
+        items[index] = media
+        mediaLibraryStore[ownerId] = items
+    }
+
+    func deleteMediaRating(ownerId: String, mediaId: String, reviewerId: String) async throws {
+        guard var items = mediaLibraryStore[ownerId], let index = items.firstIndex(where: { $0.id == mediaId }) else {
+            throw FirestoreServiceError.availabilityNotFound
+        }
+        var media = items[index]
+        media.ratings.removeValue(forKey: reviewerId)
+        media.updatedAt = Date()
+        items[index] = media
+        mediaLibraryStore[ownerId] = items
+    }
+
+    func incrementMediaPlayCount(ownerId: String, mediaId: String) async throws {
+        guard var items = mediaLibraryStore[ownerId], let index = items.firstIndex(where: { $0.id == mediaId }) else {
+            return
+        }
+        var media = items[index]
+        media.playCount += 1
+        media.updatedAt = Date()
+        items[index] = media
+        mediaLibraryStore[ownerId] = items
+    }
+
+    func upsertProfileMedia(_ media: ProfileMediaItem) async throws {
+        var items = mediaLibraryStore[media.ownerId] ?? []
+        if let index = items.firstIndex(where: { $0.id == media.id }) {
+            items[index] = media
+        } else {
+            items.append(media)
+        }
+        mediaLibraryStore[media.ownerId] = items
+    }
+
+    func deleteProfileMedia(ownerId: String, mediaId: String) async throws {
+        var items = mediaLibraryStore[ownerId] ?? []
+        items.removeAll { $0.id == mediaId }
+        mediaLibraryStore[ownerId] = items
+    }
+
+    func reorderProfileMediaPins(ownerId: String, orderedPinnedIds: [String]) async throws {
+        guard var items = mediaLibraryStore[ownerId] else { return }
+        let pinnedLookup = Dictionary(uniqueKeysWithValues: orderedPinnedIds.enumerated().map { ($1, $0) })
+        items = items.map { item in
+            var copy = item
+            copy.pinnedRank = pinnedLookup[item.id]
+            return copy
+        }
+        mediaLibraryStore[ownerId] = items
     }
 
     func fetchEngineerRequest(studioId: String, engineerId: String) async throws -> StudioEngineerRequest? {
@@ -1347,6 +1813,16 @@ final class MockFirestoreService: FirestoreService {
         )
     }
 
+    func fetchFollowers(for userId: String) async throws -> [UserProfile] {
+        let ids = Array(followersByUser[userId] ?? [])
+        return try await fetchUserProfiles(for: ids.sorted())
+    }
+
+    func fetchFollowing(for userId: String) async throws -> [UserProfile] {
+        let ids = Array(followingByUser[userId] ?? [])
+        return try await fetchUserProfiles(for: ids.sorted())
+    }
+
     func follow(userId: String, targetUserId: String) async throws {
         guard userId != targetUserId else { return }
 
@@ -1369,6 +1845,14 @@ final class MockFirestoreService: FirestoreService {
         var followers = followersByUser[targetUserId] ?? Set<String>()
         followers.remove(userId)
         followersByUser[targetUserId] = followers
+    }
+
+    func submitUserReport(_ report: UserReport) async throws {
+        if let index = userReportsStore.firstIndex(where: { $0.id == report.id }) {
+            userReportsStore[index] = report
+        } else {
+            userReportsStore.append(report)
+        }
     }
 
     func fetchRooms(for studioId: String) async throws -> [Room] {
@@ -1435,6 +1919,10 @@ final class MockFirestoreService: FirestoreService {
             entries.removeAll { $0.id == entryId }
             engineerAvailabilityStore[ownerId] = entries
         }
+    }
+
+    func loadBooking(withId id: String) async throws -> Booking? {
+        bookingsStore[id]
     }
 
     func fetchBookings(for participantId: String, role: BookingParticipantRole) async throws -> [Booking] {

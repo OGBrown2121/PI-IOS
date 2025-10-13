@@ -9,6 +9,8 @@ struct ThreadsView: View {
     @State private var toastMessage: String?
     @State private var toastDismissTask: Task<Void, Never>?
     @State private var presentedError: String?
+    @State private var isShowingAlerts = false
+    @State private var deepLinkedThread: ChatThread?
 
     init(viewModel: ChatViewModel) {
         _viewModel = StateObject(wrappedValue: viewModel)
@@ -17,32 +19,9 @@ struct ThreadsView: View {
     var body: some View {
         List {
             if viewModel.isLoading && viewModel.filteredThreads.isEmpty {
-                HStack {
-                    Spacer()
-                    ProgressView()
-                        .progressViewStyle(.circular)
-                        .padding(.vertical, Theme.spacingLarge)
-                    Spacer()
-                }
-                .listRowSeparator(.hidden)
-                .listRowBackground(Color.clear)
+                loadingRow
             } else if viewModel.filteredThreads.isEmpty {
-                VStack(spacing: Theme.spacingMedium) {
-                    Image(systemName: "bubble.left.and.bubble.right")
-                        .font(.system(size: 42))
-                        .foregroundStyle(Theme.primaryColor.opacity(0.8))
-                    Text("No conversations yet")
-                        .font(.headline)
-                    Text("Start a chat to collaborate with artists, engineers, or studios.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal)
-                }
-                .padding(.vertical, Theme.spacingXLarge)
-                .frame(maxWidth: .infinity)
-                .listRowSeparator(.hidden)
-                .listRowBackground(Color.clear)
+                emptyRow
             } else {
                 Section(header: Text("Conversations")) {
                     ForEach(viewModel.filteredThreads) { thread in
@@ -73,6 +52,9 @@ struct ThreadsView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
         .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                AlertsButton { isShowingAlerts = true }
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
                     viewModel.presentNewChat()
@@ -97,6 +79,11 @@ struct ThreadsView: View {
         ), actions: {
             Button("OK", role: .cancel) { presentedError = nil }
         })
+        .sheet(isPresented: $isShowingAlerts) {
+            NavigationStack {
+                AlertsView()
+            }
+        }
         .sheet(isPresented: $viewModel.isPresentingNewChat) {
             NavigationStack {
                 NewChatView(viewModel: viewModel) { thread in
@@ -105,11 +92,61 @@ struct ThreadsView: View {
                 }
             }
         }
+        .sheet(item: $deepLinkedThread) { thread in
+            NavigationStack {
+                ChatDetailView(
+                    viewModel: ChatDetailViewModel(
+                        thread: thread,
+                        chatService: di.chatService,
+                        appState: appState
+                    ) { updatedThread in
+                        viewModel.handleThreadUpdate(updatedThread)
+                    }
+                )
+            }
+        }
         .onChange(of: viewModel.errorMessage) { _, newValue in
             guard let newValue else { return }
             presentedError = newValue
         }
+        .onChange(of: appState.pendingChatThread) { _, newValue in
+            guard let newValue else { return }
+            viewModel.handleThreadUpdate(newValue)
+            deepLinkedThread = newValue
+            appState.pendingChatThread = nil
+        }
         .onDisappear { toastDismissTask?.cancel() }
+    }
+
+    private var loadingRow: some View {
+        HStack {
+            Spacer()
+            ProgressView()
+                .progressViewStyle(.circular)
+                .padding(.vertical, Theme.spacingLarge)
+            Spacer()
+        }
+        .listRowSeparator(.hidden)
+        .listRowBackground(Color.clear)
+    }
+
+    private var emptyRow: some View {
+        VStack(spacing: Theme.spacingMedium) {
+            Image(systemName: "bubble.left.and.bubble.right")
+                .font(.system(size: 42))
+                .foregroundStyle(Theme.primaryColor.opacity(0.8))
+            Text("No conversations yet")
+                .font(.headline)
+            Text("Start a chat to collaborate with artists, engineers, or studios.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal)
+        }
+        .padding(.vertical, Theme.spacingXLarge)
+        .frame(maxWidth: .infinity)
+        .listRowSeparator(.hidden)
+        .listRowBackground(Color.clear)
     }
 
     @MainActor
@@ -202,38 +239,16 @@ private struct ChatAvatarView: View {
             }
         }
         .frame(width: 52, height: 52)
-        .background(Circle().fill(Theme.highlightedCardBackground))
-        .clipShape(Circle())
-        .overlay(
-            Circle()
-                .stroke(Color.white.opacity(0.2), lineWidth: 1)
-        )
-        .shadow(color: Color.black.opacity(0.1), radius: 4, y: 2)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
     private var placeholder: some View {
-        Circle()
-            .fill(Theme.primaryColor.opacity(0.14))
-            .overlay(
-                Text(initials(from: fallback))
-                    .font(.headline.weight(.semibold))
-                    .foregroundStyle(Theme.primaryColor)
-            )
-    }
-
-    private func initials(from name: String) -> String {
-        let components = name.split(separator: " ")
-        let initials = components.prefix(2).compactMap { $0.first }
-        return initials.isEmpty ? "PI" : initials.map(String.init).joined().uppercased()
-    }
-}
-
-#Preview("Threads") {
-    let appState = AppState()
-    appState.currentUser = .mock
-    return NavigationStack {
-        ThreadsView(viewModel: ChatViewModel(chatService: MockChatService(), appState: appState))
-            .environmentObject(appState)
-            .environment(\.di, DIContainer.makeMock())
+        ZStack {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color(uiColor: .secondarySystemFill))
+            Text(String(fallback.prefix(1)))
+                .font(.title2.weight(.semibold))
+                .foregroundStyle(.white)
+        }
     }
 }

@@ -59,7 +59,7 @@ struct ChatDetailView: View {
                 }
             }
         }
-        .background(Color(uiColor: .systemGroupedBackground))
+        .background(Theme.appBackground)
         .sheet(isPresented: $isShowingGroupSettings) {
             GroupSettingsSheet(
                 isPresented: $isShowingGroupSettings,
@@ -135,7 +135,7 @@ private struct MessageListView: View {
                 .padding(.horizontal, Theme.spacingMedium)
                 .padding(.vertical, Theme.spacingMedium)
             }
-            .background(Color(uiColor: .systemGroupedBackground))
+            .background(Theme.appBackground)
             .onChange(of: messages.count) { _, _ in
                 scrollToBottom(proxy: proxy)
             }
@@ -534,13 +534,12 @@ private struct ParticipantDetailContainer: View {
 
     @ViewBuilder
     private func userDestination(for profile: UserProfile) -> some View {
-        switch profile.accountType {
-        case .artist:
-            ArtistDetailView(artistId: profile.id, profile: profile)
-        case .engineer:
+        if profile.accountType.isEngineer {
             EngineerDetailView(engineerId: profile.id, profile: profile)
-        case .studioOwner:
+        } else if profile.accountType.isStudioOwner {
             StudioOwnerProfileSummaryView(profile: profile)
+        } else {
+            ArtistDetailView(artistId: profile.id, profile: profile)
         }
     }
 }
@@ -583,7 +582,7 @@ private struct StudioOwnerProfileSummaryView: View {
             .frame(maxWidth: .infinity)
             .padding(Theme.spacingLarge)
         }
-        .background(Color(uiColor: .systemGroupedBackground))
+        .background(Theme.appBackground)
         .navigationTitle(displayName)
         .navigationBarTitleDisplayMode(.inline)
     }

@@ -174,5 +174,29 @@ const { Timestamp, FieldValue } = require('firebase/firestore');
     console.error('Artist cancel failed', err);
   }
 
+  try {
+    await assertSucceeds(engineerDb.doc(`users/${engineerId}/media/media-001`).set({
+      title: 'Mix Preview',
+      caption: 'Test upload',
+      format: 'audio',
+      category: 'mix',
+      mediaURL: 'https://example.com/audio.mp3',
+      createdAt: Timestamp.now(),
+      updatedAt: Timestamp.now()
+    }));
+    console.log('Engineer can create own media document');
+  } catch (err) {
+    console.error('Engineer media create failed', err);
+  }
+
+  try {
+    await assertFails(artistDb.doc(`users/${engineerId}/media/media-001`).set({
+      title: 'Unauthorized edit'
+    }, { merge: true }));
+    console.log('Artist cannot edit engineer media document');
+  } catch (err) {
+    console.error('Unauthorized media write unexpectedly succeeded', err);
+  }
+
   await env.cleanup();
 })();

@@ -94,6 +94,30 @@ final class BookingInboxViewModel: ObservableObject {
         await refresh()
     }
 
+    func booking(withId id: String) -> Booking? {
+        if let match = cachedBookings.first(where: { $0.id == id }) {
+            return match
+        }
+        if let match = pendingApprovals.first(where: { $0.id == id }) {
+            return match
+        }
+        if let match = scheduledBookings.first(where: { $0.id == id }) {
+            return match
+        }
+        if let match = pastBookings.first(where: { $0.id == id }) {
+            return match
+        }
+        return nil
+    }
+
+    func reloadBookingIfNeeded(withId id: String) async -> Booking? {
+        if let existing = booking(withId: id) {
+            return existing
+        }
+        await refresh()
+        return booking(withId: id)
+    }
+
     func refresh() async {
         guard isLoading == false else { return }
         isLoading = true
@@ -509,14 +533,16 @@ final class BookingInboxViewModel: ObservableObject {
     }
 
     private func role(for accountType: AccountType) -> ViewerRole {
-        switch accountType {
-        case .engineer:
+        if accountType.isEngineer {
             return .engineer
-        case .artist:
-            return .artist
-        case .studioOwner:
+        }
+        if accountType.isStudioOwner {
             return .studioOwner
         }
+        if accountType.canInitiateBookings {
+            return .artist
+        }
+        return .unsupported
     }
 
     private func isPastBooking(_ booking: Booking, relativeTo referenceDate: Date) -> Bool {

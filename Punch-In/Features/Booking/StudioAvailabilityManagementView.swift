@@ -122,7 +122,7 @@ struct StudioAvailabilityManagementView: View {
                 newBlockRoomId = viewModel.rooms.first?.id
             }
         }
-        .onChange(of: viewModel.rooms) { rooms in
+        .onChangeCompatibility(of: viewModel.rooms) { rooms in
             if newBlockRoomId == nil {
                 newBlockRoomId = rooms.first?.id
             }
@@ -395,7 +395,7 @@ struct StudioAvailabilityManagementView: View {
         Section("Create Block") {
             DatePicker("Start", selection: $newBlockStart, displayedComponents: [.date, .hourAndMinute])
             DatePicker("End", selection: $newBlockEnd, displayedComponents: [.date, .hourAndMinute])
-                .onChange(of: newBlockStart) { newValue in
+                .onChangeCompatibility(of: newBlockStart) { newValue in
                     if newBlockEnd <= newValue {
                         newBlockEnd = newValue.addingTimeInterval(3600)
                     }

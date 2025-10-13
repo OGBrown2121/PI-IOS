@@ -11,6 +11,10 @@ struct UserProfile: Identifiable, Equatable, Codable {
     var contact: UserContactInfo
     var engineerSettings: EngineerSettings
 
+    var mediaCapabilities: ProfileMediaCapabilities {
+        accountType.mediaCapabilities
+    }
+
     var hasCompletedOnboarding: Bool {
         profileDetails.isComplete
     }

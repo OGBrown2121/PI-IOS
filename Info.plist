@@ -18,17 +18,27 @@
     <string>$(MARKETING_VERSION)</string>
     <key>CFBundleVersion</key>
     <string>$(CURRENT_PROJECT_VERSION)</string>
-    <key>CFBundleURLTypes</key>
-    <array>
-        <dict>
-            <key>CFBundleTypeRole</key>
-            <string>Editor</string>
-            <key>CFBundleURLSchemes</key>
-            <array>
-                <string>com.googleusercontent.apps.817828725200-63vjjq07csan94l3m7b2cblvul01203m</string>
-            </array>
-        </dict>
-    </array>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.googleusercontent.apps.817828725200-63vjjq07csan94l3m7b2cblvul01203m</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>CFBundleURLName</key>
+			<string>punchin</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>punchin</string>
+			</array>
+		</dict>
+	</array>
     <key>LSRequiresIPhoneOS</key>
     <true/>
     <key>UIApplicationSupportsIndirectInputEvents</key>

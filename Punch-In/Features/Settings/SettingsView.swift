@@ -3,6 +3,7 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(\.di) private var di
     @EnvironmentObject private var appState: AppState
+    @EnvironmentObject private var uploadManager: ProfileMediaUploadManager
     @StateObject private var settingsViewModel: SettingsViewModel
     @StateObject private var studiosViewModel: StudiosViewModel
     @State private var isPresentingProfileEditor = false
@@ -10,6 +11,7 @@ struct SettingsView: View {
     @State private var studioToEdit: Studio?
     @State private var toastMessage: String?
     @State private var toastDismissTask: Task<Void, Never>?
+    @State private var isShowingAlerts = false
 
     init(viewModel: SettingsViewModel, studiosViewModel: StudiosViewModel) {
         _settingsViewModel = StateObject(wrappedValue: viewModel)
@@ -22,7 +24,7 @@ struct SettingsView: View {
                 if let profile = appState.currentUser {
                     profileSummarySection(profile)
                     profileActionsSection(profile)
-                    if profile.accountType == .studioOwner {
+                    if profile.accountType.canViewStudioOwnerTools {
                         ownerToolsSection
                     }
                 }
@@ -32,7 +34,7 @@ struct SettingsView: View {
             }
             .padding(.horizontal, Theme.spacingLarge)
             .padding(.vertical, Theme.spacingLarge)
-            .background(Color(uiColor: .systemGroupedBackground))
+            .background(Theme.appBackground)
         }
         .refreshable {
             let refreshed = await reloadProfile()
@@ -50,8 +52,8 @@ struct SettingsView: View {
                 studioToEdit = updatedStudio
             }
         }
-        .onChange(of: appState.currentUser?.accountType) { newValue in
-            if newValue == .studioOwner {
+        .onChangeCompatibility(of: appState.currentUser?.accountType) { newValue in
+            if newValue?.canViewStudioOwnerTools == true {
                 studiosViewModel.listenForStudios()
             } else {
                 studiosViewModel.stopListening()
@@ -60,6 +62,21 @@ struct SettingsView: View {
         .onDisappear {
             toastDismissTask?.cancel()
             studiosViewModel.stopListening()
+        }
+        .navigationTitle("Settings")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                AlertsButton { isShowingAlerts = true }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                ChatPillButton()
+            }
+        }
+        .sheet(isPresented: $isShowingAlerts) {
+            NavigationStack {
+                AlertsView()
+            }
         }
         .sheet(isPresented: $isPresentingProfileEditor) {
             NavigationStack {
@@ -113,7 +130,7 @@ private extension SettingsView {
 
     func profileActionsSection(_ profile: UserProfile) -> some View {
         VStack(spacing: Theme.spacingSmall) {
-            if profile.accountType == .engineer {
+            if profile.accountType.isEngineer {
                 NavigationLink {
                     EngineerDetailView(engineerId: profile.id, profile: profile)
                 } label: {
@@ -134,11 +151,27 @@ private extension SettingsView {
                     liquidAction(title: "Manage Availability", icon: "calendar", chevron: true)
                 }
                 .buttonStyle(.plain)
-            } else if profile.accountType == .artist {
+            } else if profile.accountType.isArtistFamily {
                 NavigationLink {
                     ArtistDetailView(artistId: profile.id, profile: profile)
                 } label: {
                     liquidAction(title: "View Public Profile", icon: "person.text.rectangle", chevron: true)
+                }
+                .buttonStyle(.plain)
+            }
+
+            if profile.accountType.supportsProfileMediaLibrary {
+                NavigationLink {
+                    ProfileMediaLibraryView(
+                        viewModel: ProfileMediaLibraryViewModel(
+                            firestoreService: di.firestoreService,
+                            storageService: di.storageService,
+                            currentUserProvider: { appState.currentUser },
+                            uploadManager: uploadManager
+                        )
+                    )
+                } label: {
+                    liquidAction(title: "Manage Media Library", icon: "tray.and.arrow.up", chevron: true)
                 }
                 .buttonStyle(.plain)
             }
@@ -294,7 +327,7 @@ private extension SettingsView {
     }
 
     var isOwner: Bool {
-        appState.currentUser?.accountType == .studioOwner
+        appState.currentUser?.accountType.canViewStudioOwnerTools == true
     }
 }
 
@@ -442,6 +475,7 @@ private struct OwnerToolsActionCard: View {
 #Preview("Settings") {
     let appState = AppState()
     appState.currentUser = UserProfile.mock
+    let di = DIContainer.makeMock()
     return SettingsView(
         viewModel: SettingsViewModel(authService: MockAuthService(), appState: appState),
         studiosViewModel: StudiosViewModel(
@@ -450,5 +484,6 @@ private struct OwnerToolsActionCard: View {
         )
     )
     .environmentObject(appState)
-    .environment(\.di, DIContainer.makeMock())
+    .environmentObject(ProfileMediaUploadManager(firestoreService: di.firestoreService))
+    .environment(\.di, di)
 }

@@ -66,5 +66,32 @@ const { readFileSync } = require('fs');
     console.error('Non-owner upload unexpectedly succeeded', err);
   }
 
+  try {
+    await assertSucceeds(
+      ownerStorage.ref(`users/${ownerId}/media/media-123/track.mp3`).putString('audio-bytes', 'raw', {
+        contentType: 'audio/mpeg'
+      })
+    );
+    await assertSucceeds(
+      ownerStorage.ref(`users/${ownerId}/media/media-123/video.mp4`).putString('video-bytes', 'raw', {
+        contentType: 'video/mp4'
+      })
+    );
+    console.log('Owner media uploads succeeded as expected');
+  } catch (err) {
+    console.error('Owner media upload failed unexpectedly', err);
+  }
+
+  try {
+    await assertFails(
+      otherStorage.ref(`users/${ownerId}/media/media-abc/track.mp3`).putString('audio-bytes', 'raw', {
+        contentType: 'audio/mpeg'
+      })
+    );
+    console.log('Non-owner media uploads denied as expected');
+  } catch (err) {
+    console.error('Non-owner media upload unexpectedly succeeded', err);
+  }
+
   await env.cleanup();
 })();

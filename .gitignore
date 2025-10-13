@@ -1,0 +1,14 @@
+DerivedData/
+build/
+.swiftpm/
+.build/
+SourcePackages/
+Pods/
+Carthage/
+*.xcarchive
+*.ipa
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+*.xccheckout
+.DS_Store
+.vscode/

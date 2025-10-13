@@ -20,5 +20,5 @@ struct EmptyStateView: View {
 
 #Preview("Empty State") {
     EmptyStateView(systemImageName: "tray", message: "No items yet.")
-        .background(Color(uiColor: .systemGroupedBackground))
+        .background(Theme.appBackground)
 }

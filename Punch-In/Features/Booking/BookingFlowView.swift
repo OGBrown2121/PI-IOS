@@ -39,22 +39,22 @@ struct BookingFlowView: View {
                 }
         }
         .task { await viewModel.load() }
-        .onChange(of: viewModel.startDate) { _ in
+        .onChangeCompatibility(of: viewModel.startDate) {
             Task {
                 await viewModel.refreshQuote()
                 await viewModel.refreshEngineerAvailability()
             }
         }
-        .onChange(of: viewModel.durationMinutes) { _ in
+        .onChangeCompatibility(of: viewModel.durationMinutes) {
             Task { await viewModel.refreshQuote() }
         }
-        .onChange(of: viewModel.selectedRoom?.id) { _ in
+        .onChangeCompatibility(of: viewModel.selectedRoom?.id) {
             Task {
                 await viewModel.refreshQuote()
                 await viewModel.refreshEngineerAvailability()
             }
         }
-        .onChange(of: viewModel.selectedEngineer?.id) { _ in
+        .onChangeCompatibility(of: viewModel.selectedEngineer?.id) {
             Task {
                 await viewModel.refreshQuote()
                 await viewModel.refreshEngineerAvailability()
@@ -67,7 +67,7 @@ struct BookingFlowView: View {
         if viewModel.isLoading {
             ProgressView()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color(uiColor: .systemGroupedBackground))
+                .background(Theme.appBackground)
         } else if let error = viewModel.loadErrorMessage {
             ContentUnavailableView(
                 "We couldn't load booking data",

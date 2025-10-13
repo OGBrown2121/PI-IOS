@@ -147,7 +147,7 @@ struct EngineerAvailabilityManagementView: View {
         Section("Schedule Block") {
             DatePicker("Start", selection: $blockStart, displayedComponents: [.date, .hourAndMinute])
             DatePicker("End", selection: $blockEnd, displayedComponents: [.date, .hourAndMinute])
-                .onChange(of: blockStart) { newValue in
+                .onChangeCompatibility(of: blockStart) { newValue in
                     if blockEnd <= newValue {
                         blockEnd = newValue.addingTimeInterval(3600)
                     }

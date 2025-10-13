@@ -32,6 +32,10 @@ service firebase.storage {
       return fileName == "avatar.jpg" || fileName == "banner.jpg";
     }
 
+    function isAllowedProfileMediaContentType(contentType) {
+      return contentType.matches('image/.+') || contentType.matches('audio/.+') || contentType.matches('video/.+');
+    }
+
     function conversationDocument(conversationId) {
       return firestore.get(/databases/(default)/documents/conversations/$(conversationId));
     }
@@ -83,6 +87,15 @@ service firebase.storage {
         && request.resource.contentType.matches('image/.+');
 
       // Owners can remove their own profile media.
+      allow delete: if isProfileOwner(userId);
+    }
+
+    match /users/{userId}/media/{mediaId}/{fileName} {
+      allow read: if resource != null;
+      allow create, update: if isProfileOwner(userId)
+        && request.resource != null
+        && request.resource.size < 2 * 1024 * 1024 * 1024
+        && isAllowedProfileMediaContentType(request.resource.contentType);
       allow delete: if isProfileOwner(userId);
     }
 

@@ -190,6 +190,17 @@ service cloud.firestore {
         && reviewBookingEligible(data);
     }
 
+    function validUserReport(data) {
+      return data.reportedUserId is string
+          && data.reportedUserId.size() > 0
+          && data.reporterUserId is string
+          && data.reporterUserId == request.auth.uid
+          && data.reason in ['spam', 'inappropriateContent', 'harassment', 'fraud', 'impersonation', 'other']
+          && data.createdAt is timestamp
+          && (!hasField(data, 'details') || data.details is string)
+          && (!hasField(data, 'requiresFollowUp') || data.requiresFollowUp is bool);
+    }
+
     function isEngineerRequestForCurrentOwner(data) {
       return data != null
           && hasField(data, 'studioOwnerId')
@@ -199,6 +210,31 @@ service cloud.firestore {
 
     function hasField(data, fieldName) {
       return data.keys().hasAny([fieldName]);
+    }
+
+    function validAlertPayload(data) {
+      return hasField(data, 'title') && data.title is string
+        && hasField(data, 'message') && data.message is string
+        && hasField(data, 'category') && data.category is string
+        && hasField(data, 'createdAt') && data.createdAt is timestamp
+        && hasField(data, 'isRead') && data.isRead is bool
+        && (!hasField(data, 'deeplink') || data.deeplink is string)
+        && (!hasField(data, 'readAt') || data.readAt is timestamp)
+        && data.keys().hasOnly(['title', 'message', 'category', 'createdAt', 'isRead', 'deeplink', 'readAt']);
+    }
+
+    function validAlertStatusPatch(data) {
+      return data.keys().hasOnly(['isRead', 'readAt'])
+        && (!hasField(data, 'isRead') || data.isRead is bool)
+        && (!hasField(data, 'readAt') || data.readAt is timestamp);
+    }
+
+    function validMediaRatingDoc(data) {
+      return data.keys().hasOnly(['rating', 'createdAt', 'updatedAt'])
+        && hasField(data, 'rating') && data.rating is number
+        && data.rating >= 1 && data.rating <= 5
+        && hasField(data, 'createdAt') && data.createdAt is timestamp
+        && hasField(data, 'updatedAt') && data.updatedAt is timestamp;
     }
 
     function resolvedOwnerId(before, after, studioId) {
@@ -376,6 +412,20 @@ service cloud.firestore {
         && after.confirmedEnd == null;
     }
 
+    match /userReports/{reportId} {
+      allow create: if isSignedIn()
+          && request.resource.data.keys().hasOnly([
+            'reportedUserId',
+            'reporterUserId',
+            'reason',
+            'details',
+            'createdAt',
+            'requiresFollowUp'
+          ])
+          && validUserReport(request.resource.data);
+      allow read, update, delete: if false;
+    }
+
     match /users/{userId} {
       allow read: if request.auth != null;
       allow write: if request.auth != null && request.auth.uid == userId;
@@ -407,6 +457,32 @@ service cloud.firestore {
       match /availability/{entryId} {
         allow read: if request.auth != null;
         allow create, update, delete: if request.auth != null && request.auth.uid == userId;
+      }
+
+      match /media/{mediaId} {
+        allow get: if true;
+        allow list: if true;
+        allow create, update: if isSignedIn() && request.auth.uid == userId;
+        allow delete: if isSignedIn() && request.auth.uid == userId;
+      }
+
+      match /media/{mediaId}/ratings/{ratingId} {
+        allow read: if isSignedIn();
+        allow create, update: if isSignedIn()
+            && request.auth.uid == ratingId
+            && validMediaRatingDoc(request.resource.data);
+        allow delete: if isSignedIn() && request.auth.uid == ratingId;
+      }
+
+      match /alerts/{alertId} {
+        allow read: if isSignedIn() && request.auth.uid == userId;
+        allow create: if isSignedIn()
+            && request.auth.uid == userId
+            && validAlertPayload(request.resource.data);
+        allow update: if isSignedIn()
+            && request.auth.uid == userId
+            && (validAlertPayload(request.resource.data) || validAlertStatusPatch(request.resource.data));
+        allow delete: if isSignedIn() && request.auth.uid == userId;
       }
     }
 

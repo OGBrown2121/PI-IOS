@@ -7,6 +7,9 @@ import SwiftUI
 @MainActor
 struct PunchInApp: App {
     @StateObject private var appState = AppState()
+    @StateObject private var playbackManager: MediaPlaybackManager
+    @StateObject private var alertsCenter: AlertsCenter
+    @StateObject private var uploadManager: ProfileMediaUploadManager
     private let container: DIContainer
 
     init() {
@@ -14,17 +17,52 @@ struct PunchInApp: App {
             FirebaseApp.configure()
             Firestore.enableLogging(true)
         }
-        container = DIContainer.makeDefault()
+        let container = DIContainer.makeDefault()
+        _playbackManager = StateObject(wrappedValue: MediaPlaybackManager(firestoreService: container.firestoreService))
+        _alertsCenter = StateObject(wrappedValue: AlertsCenter(alertsService: container.alertsService))
+        _uploadManager = StateObject(
+            wrappedValue: ProfileMediaUploadManager(
+                firestoreService: container.firestoreService
+            )
+        )
+        self.container = container
     }
 
     var body: some Scene {
         WindowGroup {
             AppRouter()
                 .environmentObject(appState)
+                .environmentObject(playbackManager)
+                .environmentObject(alertsCenter)
+                .environmentObject(uploadManager)
                 .environment(\.di, container)
                 .onOpenURL { url in
-                    _ = GIDSignIn.sharedInstance.handle(url)
+                    if GIDSignIn.sharedInstance.handle(url) {
+                        return
+                    }
+                    if let deepLink = DeepLinkParser.parse(url: url) {
+                        handle(deepLink)
+                    }
                 }
+        }
+    }
+
+    private func handle(_ deepLink: DeepLink) {
+        appState.pendingChatThread = nil
+        appState.targetBookingID = nil
+        appState.targetChatThreadID = nil
+        appState.targetMediaID = nil
+
+        switch deepLink {
+        case let .bookings(id):
+            appState.selectedTab = .book
+            appState.targetBookingID = id
+        case let .chat(threadId):
+            appState.isShowingChat = true
+            appState.targetChatThreadID = threadId
+        case let .media(mediaId):
+            appState.selectedTab = .profile
+            appState.targetMediaID = mediaId
         }
     }
 }

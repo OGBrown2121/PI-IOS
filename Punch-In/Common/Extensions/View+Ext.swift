@@ -8,6 +8,32 @@ extension View {
     func toast(message: Binding<String?>, bottomInset: CGFloat = 24) -> some View {
         modifier(ToastModifier(message: message, bottomInset: bottomInset))
     }
+
+    @ViewBuilder
+    func onChangeCompatibility<Value: Equatable>(
+        of value: Value,
+        perform action: @escaping (_ newValue: Value) -> Void
+    ) -> some View {
+        if #available(iOS 17, *) {
+            onChange(of: value) { _, newValue in
+                action(newValue)
+            }
+        } else {
+            onChange(of: value, perform: action)
+        }
+    }
+
+    @ViewBuilder
+    func onChangeCompatibility<Value: Equatable>(
+        of value: Value,
+        perform action: @escaping () -> Void
+    ) -> some View {
+        if #available(iOS 17, *) {
+            onChange(of: value) { _, _ in action() }
+        } else {
+            onChange(of: value) { _ in action() }
+        }
+    }
 }
 
 private struct ToastView: View {

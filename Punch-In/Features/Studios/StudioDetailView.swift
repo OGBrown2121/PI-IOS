@@ -55,7 +55,7 @@ struct StudioDetailView: View {
             await loadTodayAvailability()
             await loadReviews()
         }
-        .onChange(of: studio.approvedEngineerIds) { ids in
+        .onChangeCompatibility(of: studio.approvedEngineerIds) { ids in
             updateEngineerStatusCache(with: ids)
             Task { await loadAcceptedEngineersIfNeeded(force: true) }
         }
@@ -236,7 +236,7 @@ struct StudioDetailView: View {
 
     private var canCurrentUserBook: Bool {
         guard let user = appState.currentUser else { return false }
-        return user.accountType == .artist
+        return user.accountType.canInitiateBookings
     }
 
     @ViewBuilder
@@ -510,7 +510,7 @@ struct StudioDetailView: View {
 
     private var isCurrentUserEngineer: Bool {
         guard let profile = appState.currentUser else { return false }
-        return profile.accountType == .engineer
+        return profile.accountType.isEngineer
     }
 
     private var currentEngineerId: String? {

@@ -5,6 +5,7 @@ struct ArtistDetailView: View {
     @EnvironmentObject private var appState: AppState
 
     let artistId: String
+    private let heroStyle: HeroStyle
 
     @State private var profile: UserProfile?
     @State private var isLoading = false
@@ -16,9 +17,17 @@ struct ArtistDetailView: View {
     @State private var isLoadingFollowStats = true
     @State private var isUpdatingFollow = false
     @State private var followErrorMessage: String?
+    @State private var mediaItems: [ProfileMediaItem] = []
+    @State private var isLoadingMediaLibrary = false
+    @State private var mediaErrorMessage: String?
+    @State private var presentedFollowList: FollowConnectionsKind?
+    @State private var isShowingReportSheet = false
+    @State private var reportToastMessage: String?
+    @State private var reportToastTask: Task<Void, Never>?
 
-    init(artistId: String, profile: UserProfile? = nil) {
+    init(artistId: String, profile: UserProfile? = nil, heroStyle: HeroStyle = .standard) {
         self.artistId = artistId
+        self.heroStyle = heroStyle
         _profile = State(initialValue: profile)
     }
 
@@ -28,6 +37,9 @@ struct ArtistDetailView: View {
                 ScrollView(.vertical, showsIndicators: false) {
                     VStack(alignment: .leading, spacing: Theme.spacingLarge) {
                         heroSection(for: profile)
+                        if profile.accountType.supportsProfileMediaLibrary {
+                            mediaSection(for: profile)
+                        }
                         if activeProjects(for: profile).isEmpty == false {
                             ProfileSpotlightSection(
                                 title: "Pinned Projects",
@@ -51,7 +63,7 @@ struct ArtistDetailView: View {
                     }
                     .padding(Theme.spacingLarge)
                 }
-                .background(Color(uiColor: .systemBackground))
+                .background(Theme.appBackground)
                 .navigationTitle(profile.displayName.isEmpty ? profile.username : profile.displayName)
                 .navigationBarTitleDisplayMode(.inline)
             } else if isLoading {
@@ -73,21 +85,114 @@ struct ArtistDetailView: View {
             await refreshFollowStatsIfNeeded()
             await loadReviews()
         }
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                if let profile,
+                   let currentUser = appState.currentUser,
+                   currentUser.id != profile.id {
+                    Menu {
+                        Button(role: .destructive) {
+                            isShowingReportSheet = true
+                        } label: {
+                            let name = profile.displayName.isEmpty ? profile.username : profile.displayName
+                            Label("Report \(name)", systemImage: "flag")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                            .font(.title3)
+                            .foregroundStyle(.secondary)
+                    }
+                    .accessibilityLabel("More actions")
+                }
+            }
+        }
+        .sheet(item: $presentedFollowList) { kind in
+            NavigationStack {
+                if let profile = self.profile {
+                    FollowConnectionsView(
+                        userId: profile.id,
+                        kind: kind,
+                        firestoreService: di.firestoreService
+                    )
+                } else {
+                    ProgressView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .environment(\.di, di)
+            .environmentObject(appState)
+        }
+        .sheet(isPresented: $isShowingReportSheet) {
+            if let profile {
+                ReportUserView(
+                    viewModel: ReportUserViewModel(
+                        reportedUser: profile,
+                        reportService: di.reportService,
+                        currentUserProvider: { appState.currentUser }
+                    ),
+                    onSubmitted: {
+                        showReportToast("Thanks for letting us know.")
+                    }
+                )
+            } else {
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .toast(message: $reportToastMessage, bottomInset: 120)
+        .onDisappear {
+            reportToastTask?.cancel()
+            reportToastTask = nil
+        }
     }
 
-    private enum ArtistHeroMetrics {
-        static let avatarSize: CGFloat = 88
-        static let cardCornerRadius: CGFloat = 26
-        static let horizontalPadding: CGFloat = Theme.spacingLarge
-        static let verticalPadding: CGFloat = Theme.spacingMedium * CGFloat(0.85)
-        static let shadowRadius: CGFloat = 6
-        static let shadowYOffset: CGFloat = 4
+    struct ArtistHeroMetrics {
+        let avatarSize: CGFloat
+        let cardCornerRadius: CGFloat
+        let horizontalPadding: CGFloat
+        let verticalPadding: CGFloat
+        let shadowRadius: CGFloat
+        let shadowYOffset: CGFloat
+
+        static let standard = ArtistHeroMetrics(
+            avatarSize: 76,
+            cardCornerRadius: 22,
+            horizontalPadding: Theme.spacingMedium,
+            verticalPadding: Theme.spacingMedium * 0.55,
+            shadowRadius: 4,
+            shadowYOffset: 3
+        )
+
+        static let compact = ArtistHeroMetrics(
+            avatarSize: 64,
+            cardCornerRadius: 20,
+            horizontalPadding: Theme.spacingSmall * 1.25,
+            verticalPadding: Theme.spacingSmall * 0.85,
+            shadowRadius: 3,
+            shadowYOffset: 2
+        )
+    }
+
+    enum HeroStyle {
+        case standard
+        case compact
+
+        var metrics: ArtistHeroMetrics {
+            switch self {
+            case .standard:
+                return .standard
+            case .compact:
+                return .compact
+            }
+        }
     }
 
     private func heroSection(for profile: UserProfile) -> some View {
-        VStack(spacing: Theme.spacingSmall * CGFloat(0.8)) {
+        let metrics = heroStyle.metrics
+
+        return VStack(spacing: Theme.spacingSmall * 0.6) {
             avatar(for: profile)
-                .padding(.bottom, Theme.spacingSmall)
+                .padding(.bottom, Theme.spacingSmall * 0.6)
 
             Text(profile.accountType.title.uppercased())
                 .font(.caption2.weight(.heavy))
@@ -103,41 +208,91 @@ struct ArtistDetailView: View {
                 )
 
             Text(profile.displayName.isEmpty ? profile.username : profile.displayName)
-                .font(.title2.weight(.heavy))
+                .font(.title3.weight(.heavy))
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.white)
 
             Text("@\(profile.username)")
-                .font(.footnote.weight(.semibold))
+                .font(.caption.weight(.semibold))
                 .foregroundStyle(.white.opacity(0.85))
 
             if !profile.profileDetails.bio.isEmpty {
                 Text(profile.profileDetails.bio)
-                    .font(.footnote)
+                    .font(.caption)
                     .foregroundStyle(.white.opacity(0.9))
                     .multilineTextAlignment(.center)
-                    .padding(.top, Theme.spacingSmall * CGFloat(0.75))
+                    .padding(.top, Theme.spacingSmall * 0.5)
             }
 
             followSummarySection(for: profile)
         }
         .frame(maxWidth: .infinity)
-        .padding(.horizontal, ArtistHeroMetrics.horizontalPadding)
-        .padding(.vertical, ArtistHeroMetrics.verticalPadding)
+        .padding(.horizontal, metrics.horizontalPadding)
+        .padding(.vertical, metrics.verticalPadding)
         .background(
-            RoundedRectangle(cornerRadius: ArtistHeroMetrics.cardCornerRadius, style: .continuous)
+            RoundedRectangle(cornerRadius: metrics.cardCornerRadius, style: .continuous)
                 .fill(heroGradient)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: ArtistHeroMetrics.cardCornerRadius, style: .continuous)
+            RoundedRectangle(cornerRadius: metrics.cardCornerRadius, style: .continuous)
                 .stroke(.white.opacity(0.15), lineWidth: 1)
         )
         .shadow(
             color: Theme.primaryColor.opacity(0.18),
-            radius: ArtistHeroMetrics.shadowRadius,
+            radius: metrics.shadowRadius,
             x: 0,
-            y: ArtistHeroMetrics.shadowYOffset
+            y: metrics.shadowYOffset
         )
+    }
+
+    private func mediaSection(for profile: UserProfile) -> some View {
+        VStack(alignment: .leading, spacing: Theme.spacingMedium) {
+            if isLoadingMediaLibrary {
+                ProgressView("Loading featured media…")
+                    .progressViewStyle(.circular)
+            } else if let message = mediaErrorMessage {
+                Label(message, systemImage: "exclamationmark.triangle")
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            } else if mediaItems.isEmpty {
+                Text("Add uploads from your settings to showcase music, mixes, or visuals.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else {
+                let pinned = mediaItems.filter { $0.isPinned }
+
+                if pinned.isEmpty == false {
+                    ProfileMediaShowcaseSection(
+                        title: profile.mediaCapabilities.pinnedSectionTitle,
+                        icon: "star.fill",
+                        accentColor: mediaAccentColor(for: profile.accountType),
+                        items: pinned
+                    )
+                } else {
+                    Text("Pin uploads from your settings to highlight them here.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .task {
+            await loadMediaIfNeeded(for: profile)
+        }
+    }
+
+    private func mediaAccentColor(for accountType: AccountType) -> Color {
+        switch accountType {
+        case .dj:
+            return Color.purple
+        case .photographer:
+            return Color.orange
+        case .videographer:
+            return Color.blue
+        case .podcast:
+            return Color.mint
+        default:
+            return Theme.primaryColor
+        }
     }
 
     private func followSummarySection(for profile: UserProfile) -> some View {
@@ -148,8 +303,16 @@ struct ArtistDetailView: View {
                     .tint(.white)
             } else {
                 HStack(spacing: Theme.spacingMedium) {
-                    followMetricView(count: followStats.followersCount, label: followersLabel)
-                    followMetricView(count: followStats.followingCount, label: "Following")
+                    followMetricButton(
+                        count: followStats.followersCount,
+                        label: followersLabel,
+                        kind: .followers
+                    )
+                    followMetricButton(
+                        count: followStats.followingCount,
+                        label: "Following",
+                        kind: .following
+                    )
                 }
             }
 
@@ -173,7 +336,7 @@ struct ArtistDetailView: View {
                         }
                     }
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
+                    .padding(.vertical, 8)
                 }
                 .buttonStyle(.plain)
                 .background(
@@ -201,13 +364,23 @@ struct ArtistDetailView: View {
     private func followMetricView(count: Int, label: String) -> some View {
         VStack(spacing: 4) {
             Text("\(count)")
-                .font(.headline.weight(.bold))
+                .font(.subheadline.weight(.bold))
                 .foregroundStyle(.white)
             Text(label.uppercased())
-                .font(.caption.weight(.semibold))
+                .font(.caption2.weight(.semibold))
                 .foregroundStyle(.white.opacity(0.75))
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private func followMetricButton(count: Int, label: String, kind: FollowConnectionsKind) -> some View {
+        Button {
+            presentedFollowList = kind
+        } label: {
+            followMetricView(count: count, label: label)
+        }
+        .buttonStyle(.plain)
+        .disabled(isLoadingFollowStats)
     }
 
     private var followersLabel: String {
@@ -366,7 +539,9 @@ struct ArtistDetailView: View {
     }()
 
     private func avatar(for profile: UserProfile) -> some View {
-        Group {
+        let metrics = heroStyle.metrics
+
+        return Group {
             if let imageURL = profile.profileImageURL {
                 AsyncImage(url: imageURL) { phase in
                     switch phase {
@@ -386,7 +561,7 @@ struct ArtistDetailView: View {
                 placeholderAvatar(for: profile)
             }
         }
-        .frame(width: ArtistHeroMetrics.avatarSize, height: ArtistHeroMetrics.avatarSize)
+        .frame(width: metrics.avatarSize, height: metrics.avatarSize)
         .clipShape(Circle())
         .overlay(
             Circle()
@@ -401,7 +576,7 @@ struct ArtistDetailView: View {
             Circle()
                 .fill(heroGradient)
             Text(initials)
-                .font(.title.weight(.bold))
+                .font(.title2.weight(.bold))
                 .foregroundStyle(.white)
         }
     }
@@ -544,11 +719,43 @@ struct ArtistDetailView: View {
             profile = try await di.firestoreService.loadUserProfile(for: artistId)
             if profile == nil {
                 errorMessage = "We couldn't find this artist."
+            } else if let loadedProfile = profile, loadedProfile.accountType.supportsProfileMediaLibrary {
+                await loadMedia(for: loadedProfile)
             }
         } catch {
             errorMessage = error.localizedDescription
         }
         isLoading = false
+    }
+
+    private func loadMediaIfNeeded(for profile: UserProfile) async {
+        guard mediaItems.isEmpty else { return }
+        await loadMedia(for: profile)
+    }
+
+    private func loadMedia(for profile: UserProfile) async {
+        guard isLoadingMediaLibrary == false else { return }
+        isLoadingMediaLibrary = true
+        defer { isLoadingMediaLibrary = false }
+        do {
+            let items = try await di.firestoreService.fetchProfileMedia(for: profile.id)
+            mediaItems = items.filter(\.isShared)
+            mediaErrorMessage = nil
+        } catch {
+            mediaErrorMessage = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func showReportToast(_ message: String) {
+        reportToastTask?.cancel()
+        withAnimation { reportToastMessage = message }
+        reportToastTask = Task {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            await MainActor.run {
+                withAnimation { reportToastMessage = nil }
+            }
+        }
     }
 }
 

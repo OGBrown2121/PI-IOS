@@ -2,6 +2,7 @@ import SwiftUI
 
 struct AppRouter: View {
     @EnvironmentObject private var appState: AppState
+    @EnvironmentObject private var alertsCenter: AlertsCenter
     @Environment(\.di) private var di
 
     var body: some View {
@@ -31,46 +32,195 @@ struct AppRouter: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(uiColor: .systemGroupedBackground))
+        .background(Theme.appBackground)
         .animation(.default, value: appState.isAuthenticated)
         .animation(.default, value: appState.hasCompletedOnboarding)
+        .task {
+            if let userId = appState.currentUser?.id {
+                alertsCenter.start(for: userId)
+            } else {
+                alertsCenter.stop()
+            }
+        }
+        .onChange(of: appState.currentUser?.id) { _, newValue in
+            if let newValue {
+                alertsCenter.start(for: newValue)
+            } else {
+                alertsCenter.stop()
+            }
+        }
     }
 }
 
 private struct MainTabView: View {
     @Environment(\.di) private var di
     @EnvironmentObject private var appState: AppState
-    @State private var selectedTab: Tab = .discovery
+    @EnvironmentObject private var playbackManager: MediaPlaybackManager
+    @EnvironmentObject private var uploadManager: ProfileMediaUploadManager
     @State private var discoveryPath = NavigationPath()
-    @State private var chatPath = NavigationPath()
+    @State private var eventsPath = NavigationPath()
     @State private var bookPath = NavigationPath()
-    @State private var settingsPath = NavigationPath()
+    @State private var profilePath = NavigationPath()
     @State private var tabBarHeight: CGFloat = 0
+    @State private var miniPlayerHeight: CGFloat = 0
+    @State private var uploadBannerHeight: CGFloat = 0
+    @State private var isShowingNowPlaying = false
+    @State private var deepLinkMediaItem: ProfileMediaItem?
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            content(for: selectedTab)
+            content(for: appState.selectedTab)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(.bottom, tabBarHeight)
+                .padding(
+                    .bottom,
+                    tabBarHeight
+                        + (uploadManager.activeUpload == nil ? 0 : uploadBannerHeight + 12)
+                        + (playbackManager.currentItem == nil ? 0 : miniPlayerHeight + 12)
+                )
 
-            LiquidTabBar(selectedTab: $selectedTab)
-                .padding(.horizontal, 20)
-                .padding(.bottom, 10)
-                .overlay {
-                    GeometryReader { proxy in
-                        Color.clear
-                            .preference(key: TabBarHeightPreferenceKey.self, value: proxy.size.height)
-                    }
-                    .allowsHitTesting(false)
+            VStack(spacing: 12) {
+                if uploadManager.activeUpload != nil {
+                    ProfileMediaUploadBanner()
+                        .background(
+                            GeometryReader { proxy in
+                                Color.clear
+                                    .preference(key: UploadBannerHeightPreferenceKey.self, value: proxy.size.height)
+                            }
+                        )
                 }
+
+                if playbackManager.currentItem != nil {
+                    ProfileMediaMiniPlayer { item in
+                        isShowingNowPlaying = true
+                    }
+                    .background(
+                        GeometryReader { proxy in
+                            Color.clear
+                                .preference(key: MiniPlayerHeightPreferenceKey.self, value: proxy.size.height)
+                        }
+                    )
+                }
+
+                LiquidTabBar(selectedTab: Binding(
+                    get: { appState.selectedTab },
+                    set: { appState.selectedTab = $0 }
+                ))
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 10)
+                    .overlay {
+                        GeometryReader { proxy in
+                            Color.clear
+                                .preference(key: TabBarHeightPreferenceKey.self, value: proxy.size.height)
+                        }
+                        .allowsHitTesting(false)
+                    }
+            }
         }
+        .background(Theme.appBackground.ignoresSafeArea())
         .onPreferenceChange(TabBarHeightPreferenceKey.self) { newValue in
             tabBarHeight = newValue
+        }
+        .onPreferenceChange(UploadBannerHeightPreferenceKey.self) { newValue in
+            uploadBannerHeight = newValue
+        }
+        .onPreferenceChange(MiniPlayerHeightPreferenceKey.self) { newValue in
+            miniPlayerHeight = newValue
+        }
+        .sheet(isPresented: $isShowingNowPlaying) {
+            if let item = playbackManager.currentItem {
+                NavigationStack {
+                    ProfileMediaDetailView(
+                        media: item,
+                        firestoreService: di.firestoreService,
+                        storageService: di.storageService,
+                        currentUserProvider: { appState.currentUser }
+                    )
+                }
+                .environmentObject(uploadManager)
+            }
+        }
+        .sheet(isPresented: Binding(
+            get: { appState.isShowingChat },
+            set: { appState.isShowingChat = $0 }
+        )) {
+            NavigationStack {
+                ThreadsView(viewModel: ChatViewModel(chatService: di.chatService, appState: appState))
+            }
+        }
+        .sheet(item: $deepLinkMediaItem) { media in
+            NavigationStack {
+                ProfileMediaDetailView(
+                    media: media,
+                    firestoreService: di.firestoreService,
+                    storageService: di.storageService,
+                    currentUserProvider: { appState.currentUser }
+                )
+            }
+            .environmentObject(playbackManager)
+            .environmentObject(appState)
+            .environmentObject(uploadManager)
+        }
+        .onChange(of: appState.targetChatThreadID) { _, newValue in
+            guard let threadId = newValue else { return }
+            Task {
+                do {
+                    let thread = try await di.chatService.thread(withId: threadId)
+                    await MainActor.run {
+                        if appState.isShowingChat == false {
+                            appState.isShowingChat = true
+                        }
+                        appState.pendingChatThread = thread
+                        appState.targetChatThreadID = nil
+                    }
+                } catch {
+                    await MainActor.run {
+                        Logger.log("Failed to open chat thread \(threadId): \(error.localizedDescription)")
+                        appState.pendingChatThread = nil
+                        appState.targetChatThreadID = nil
+                    }
+                }
+            }
+        }
+        .onChange(of: appState.targetBookingID) { _, newValue in
+            guard newValue != nil else { return }
+            if appState.selectedTab != .book {
+                appState.selectedTab = .book
+            }
+        }
+        .onChange(of: appState.targetMediaID) { _, newValue in
+            guard let mediaId = newValue else { return }
+            guard let ownerId = appState.currentUser?.id else {
+                appState.targetMediaID = nil
+                return
+            }
+            Task {
+                do {
+                    if let media = try await di.firestoreService.loadProfileMedia(ownerId: ownerId, mediaId: mediaId) {
+                        await MainActor.run {
+                            deepLinkMediaItem = media
+                            if appState.selectedTab != .profile {
+                                appState.selectedTab = .profile
+                            }
+                        }
+                    } else {
+                        await MainActor.run {
+                            Logger.log("Profile media item not found for id=\(mediaId)")
+                        }
+                    }
+                } catch {
+                    await MainActor.run {
+                        Logger.log("Failed to load profile media \(mediaId): \(error.localizedDescription)")
+                    }
+                }
+                await MainActor.run {
+                    appState.targetMediaID = nil
+                }
+            }
         }
     }
 
     @ViewBuilder
-    private func content(for tab: Tab) -> some View {
+    private func content(for tab: AppTab) -> some View {
         switch tab {
         case .discovery:
             NavigationStack(path: $discoveryPath) {
@@ -79,9 +229,9 @@ private struct MainTabView: View {
                     storageService: di.storageService
                 ))
             }
-        case .chat:
-            NavigationStack(path: $chatPath) {
-                ThreadsView(viewModel: ChatViewModel(chatService: di.chatService, appState: appState))
+        case .events:
+            NavigationStack(path: $eventsPath) {
+                EventsView()
             }
         case .book:
             NavigationStack(path: $bookPath) {
@@ -92,37 +242,9 @@ private struct MainTabView: View {
                     currentUserProvider: { appState.currentUser }
                 )
             }
-        case .settings:
-            NavigationStack(path: $settingsPath) {
-                SettingsView(
-                    viewModel: SettingsViewModel(authService: di.authService, appState: appState),
-                    studiosViewModel: StudiosViewModel(
-                        firestoreService: di.firestoreService,
-                        storageService: di.storageService
-                    )
-                )
-            }
-        }
-    }
-
-    fileprivate enum Tab: String, CaseIterable, Hashable {
-        case discovery, chat, book, settings
-
-        var title: String {
-            switch self {
-            case .discovery: return "Discovery"
-            case .chat: return "Chat"
-            case .book: return "Book"
-            case .settings: return "Settings"
-            }
-        }
-
-        var icon: String {
-            switch self {
-            case .discovery: return "sparkle.magnifyingglass"
-            case .chat: return "bubble.left.and.bubble.right"
-            case .book: return "calendar"
-            case .settings: return "gear"
+        case .profile:
+            NavigationStack(path: $profilePath) {
+                ProfileTabView()
             }
         }
     }
@@ -136,14 +258,30 @@ private enum TabBarHeightPreferenceKey: PreferenceKey {
     }
 }
 
+private enum MiniPlayerHeightPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat { 0 }
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+private enum UploadBannerHeightPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat { 0 }
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
 private struct LiquidTabBar: View {
     @Environment(\.colorScheme) private var colorScheme
-    @Binding var selectedTab: MainTabView.Tab
+    @Binding var selectedTab: AppTab
 
     var body: some View {
         HStack(spacing: 8) {
-            ForEach(MainTabView.Tab.allCases, id: \.self) { tab in
-                LiquidTabBarItem(title: tab.title, systemImage: tab.icon, isSelected: selectedTab == tab) {
+            ForEach(AppTab.allCases, id: \.self) { tab in
+                LiquidTabBarItem(tab: tab, isSelected: selectedTab == tab) {
                     withAnimation(.spring(response: 0.32, dampingFraction: 0.82, blendDuration: 0.2)) {
                         selectedTab = tab
                     }
@@ -183,8 +321,7 @@ private struct LiquidTabBar: View {
 
 private struct LiquidTabBarItem: View {
     @Environment(\.colorScheme) private var colorScheme
-    let title: String
-    let systemImage: String
+    let tab: AppTab
     let isSelected: Bool
     let action: () -> Void
 
@@ -193,7 +330,7 @@ private struct LiquidTabBarItem: View {
             VStack(spacing: 3) {
                 icon
 
-                Text(title)
+                Text(tab.title)
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(textColor)
             }
@@ -208,12 +345,12 @@ private struct LiquidTabBarItem: View {
     @ViewBuilder
     private var icon: some View {
         if #available(iOS 17.0, *) {
-            Image(systemName: systemImage)
+            Image(systemName: tab.icon)
                 .font(.system(size: 15, weight: .semibold))
                 .symbolEffect(.bounce, value: isSelected)
                 .foregroundStyle(iconColor)
         } else {
-            Image(systemName: systemImage)
+            Image(systemName: tab.icon)
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(iconColor)
         }

@@ -59,6 +59,7 @@ protocol BookingService {
     func loadContext(for studio: Studio, preferredEngineerId: String?) async throws -> BookingContext
     func quote(for request: BookingRequestInput) async throws -> BookingQuote
     func submit(request: BookingRequestInput) async throws -> Booking
+    func loadBooking(withId id: String) async throws -> Booking?
     func fetchBookings(for participantId: String, role: BookingParticipantRole) async throws -> [Booking]
     func updateBooking(_ booking: Booking) async throws
     func validateReschedule(for booking: Booking, newStart: Date, durationMinutes: Int) async throws
@@ -155,6 +156,10 @@ struct DefaultBookingService: BookingService {
         try await firestore.createBooking(booking)
 
         return booking
+    }
+
+    func loadBooking(withId id: String) async throws -> Booking? {
+        try await firestore.loadBooking(withId: id)
     }
 
     func fetchBookings(for participantId: String, role: BookingParticipantRole) async throws -> [Booking] {

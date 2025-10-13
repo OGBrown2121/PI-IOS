@@ -2,6 +2,7 @@ import SwiftUI
 
 struct BookingInboxView: View {
     @StateObject private var viewModel: BookingInboxViewModel
+    @State private var isShowingAlerts = false
 
     init(
         bookingService: any BookingService,
@@ -21,8 +22,22 @@ struct BookingInboxView: View {
 
     var body: some View {
         content
+            .background(Theme.appBackground.ignoresSafeArea())
             .navigationTitle("Bookings")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    AlertsButton { isShowingAlerts = true }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    ChatPillButton()
+                }
+            }
+            .sheet(isPresented: $isShowingAlerts) {
+                NavigationStack {
+                    AlertsView()
+                }
+            }
             .task { await viewModel.load() }
     }
 
@@ -32,7 +47,7 @@ struct BookingInboxView: View {
         case .unknown:
             ProgressView()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color(uiColor: .systemGroupedBackground))
+                .background(Theme.appBackground)
         case .unsupported:
             ContentUnavailableView(
                 "Bookings unavailable",
@@ -72,6 +87,7 @@ struct BookingInboxView: View {
 
 private struct InboxContent: View {
     @EnvironmentObject private var viewModel: BookingInboxViewModel
+    @EnvironmentObject private var appState: AppState
 
     let pending: [Booking]
     let scheduled: [Booking]
@@ -193,6 +209,23 @@ private struct InboxContent: View {
                 } label: {
                     Image(systemName: "line.3.horizontal.decrease.circle")
                         .imageScale(.large)
+                }
+            }
+        }
+        .onChange(of: appState.targetBookingID) { _, newValue in
+            guard let bookingId = newValue else { return }
+            Task {
+                if let booking = await viewModel.reloadBookingIfNeeded(withId: bookingId) {
+                    await MainActor.run {
+                        bookingForDetails = booking
+                    }
+                } else {
+                    await MainActor.run {
+                        Logger.log("Booking deep link not found: \(bookingId)")
+                    }
+                }
+                await MainActor.run {
+                    appState.targetBookingID = nil
                 }
             }
         }
@@ -361,6 +394,8 @@ private struct BookingListView: View {
             }
         }
         .listStyle(.insetGrouped)
+        .scrollContentBackground(.hidden)
+        .background(Theme.appBackground)
         .refreshable {
             await viewModel.refresh()
         }
@@ -674,7 +709,7 @@ private struct BookingDetailSheet: View {
                 .padding(.top, 24)
                 .padding(.bottom, 32)
             }
-            .background(Color(uiColor: .systemGroupedBackground))
+            .background(Theme.appBackground)
             .navigationTitle("Session details")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -1120,7 +1155,7 @@ private struct PastSessionsLogView: View {
                         description: Text("Completed and cancelled sessions will show up here for reference.")
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Color(uiColor: .systemGroupedBackground))
+                    .background(Theme.appBackground)
                 } else {
                     List {
                         ForEach(groupedHistory) { section in
@@ -1135,6 +1170,8 @@ private struct PastSessionsLogView: View {
                         }
                     }
                     .listStyle(.insetGrouped)
+                    .scrollContentBackground(.hidden)
+                    .background(Theme.appBackground)
                 }
             }
             .navigationTitle("Session history")

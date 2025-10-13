@@ -1,10 +1,13 @@
 import SwiftUI
 
 struct StudioListView: View {
+    @EnvironmentObject private var appState: AppState
     @StateObject private var viewModel: StudiosViewModel
     @State private var toastMessage: String?
     @State private var toastDismissTask: Task<Void, Never>?
     @FocusState private var isSearchFocused: Bool
+    @State private var isShowingAlerts = false
+    @State private var selectedCategory: DiscoveryCategory = .studios
 
     init(viewModel: StudiosViewModel) {
         _viewModel = StateObject(wrappedValue: viewModel)
@@ -13,16 +16,16 @@ struct StudioListView: View {
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(alignment: .leading, spacing: Theme.spacingLarge) {
-                heroBanner
+                discoveryHeader
 
-                userSearchSection
+                categorySelector
 
-                studiosSection
+                categoryContent
             }
-            .padding(.horizontal, Theme.spacingLarge)
-            .padding(.vertical, Theme.spacingLarge)
+            .padding(.horizontal, Theme.spacingMedium)
+            .padding(.vertical, Theme.spacingMedium)
         }
-        .background(Color(uiColor: .systemGroupedBackground))
+        .background(Theme.appBackground)
         .task { viewModel.listenForStudios() }
         .onDisappear {
             viewModel.stopListening()
@@ -33,35 +36,237 @@ struct StudioListView: View {
             await MainActor.run { showToast(success ? "Studios updated" : "Refresh failed") }
         }
         .toast(message: $toastMessage, bottomInset: 110)
-    }
-
-    private var heroBanner: some View {
-        ZStack(alignment: .leading) {
-            RoundedRectangle(cornerRadius: 32, style: .continuous)
-                .fill(heroGradient)
-                .shadow(color: Theme.primaryColor.opacity(0.2), radius: 16, x: 0, y: 12)
-
-            VStack(alignment: .leading, spacing: Theme.spacingSmall) {
-                Text("Discovery Hub")
-                    .font(.title.weight(.heavy))
-                Text("Explore studios and discover artists or engineers to collaborate with.")
-                    .font(.subheadline)
-                    .foregroundStyle(.white.opacity(0.9))
+        .navigationBarBackButtonHidden(true)
+        .toolbar(.hidden, for: .navigationBar)
+        .sheet(isPresented: $isShowingAlerts) {
+            NavigationStack {
+                AlertsView()
             }
-            .padding(Theme.spacingLarge)
-            .foregroundStyle(.white)
         }
     }
 
-    private var userSearchSection: some View {
+    private var discoveryHeader: some View {
         VStack(alignment: .leading, spacing: Theme.spacingMedium) {
-            Text("Find collaborators")
-                .font(.headline.weight(.semibold))
+            topBar
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Punch-In")
+                    .font(.system(size: 28, weight: .heavy, design: .rounded))
+                    .foregroundStyle(LinearGradient(
+                        colors: [Theme.primaryGradientStart, Theme.primaryGradientEnd],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    ))
+
+                Text("Find collaborators")
+                    .font(.system(size: 20, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Color.primary)
+            }
 
             userSearchField
 
-            if viewModel.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).count < 2 {
-                Text("Type at least two characters to search by username or display name.")
+            searchFeedback
+
+            Divider()
+                .overlay(Color.primary.opacity(0.15))
+        }
+    }
+
+    private var topBar: some View {
+        HStack(spacing: Theme.spacingSmall) {
+            notificationButton
+
+            Spacer()
+
+            ChatPillButton()
+        }
+    }
+
+    private var categorySelector: some View {
+        HStack(spacing: Theme.spacingSmall) {
+            categoryArrow(direction: .previous)
+
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: Theme.spacingSmall) {
+                        ForEach(DiscoveryCategory.allCases) { category in
+                            categoryButton(for: category)
+                                .id(category)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+                .frame(maxWidth: .infinity)
+                .onAppear {
+                    proxy.scrollTo(selectedCategory, anchor: .center)
+                }
+                .onChange(of: selectedCategory) { _, newValue in
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+                        proxy.scrollTo(newValue, anchor: .center)
+                    }
+                }
+            }
+
+            categoryArrow(direction: .next)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .fill(Theme.cardBackground)
+                .shadow(color: Color.black.opacity(0.04), radius: 8, y: 4)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+        )
+    }
+
+    private var notificationButton: some View {
+        AlertsButton { isShowingAlerts = true }
+            .padding(8)
+            .background(buttonBackground)
+            .overlay(buttonBorder)
+    }
+
+    private var buttonBackground: some View {
+        RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .fill(Theme.cardBackground)
+            .shadow(color: Color.black.opacity(0.04), radius: 8, y: 4)
+    }
+
+    private var buttonBorder: some View {
+        RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+    }
+
+    @ViewBuilder
+    private var categoryContent: some View {
+        switch selectedCategory {
+        case .studios:
+            studiosSection
+        default:
+            placeholderCard(
+                title: selectedCategory.placeholderTitle,
+                message: selectedCategory.placeholderMessage,
+                iconName: selectedCategory.iconName
+            )
+        }
+    }
+
+    private func categoryArrow(direction: CategoryDirection) -> some View {
+        Button {
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
+                selectedCategory = direction == .next ? selectedCategory.next() : selectedCategory.previous()
+            }
+        } label: {
+            Image(systemName: direction == .next ? "chevron.right" : "chevron.left")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(Color.primary)
+                .frame(width: 36, height: 36)
+                .background(buttonBackground)
+                .overlay(buttonBorder)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(direction == .next ? "Next category" : "Previous category")
+    }
+
+    private func categoryButton(for category: DiscoveryCategory) -> some View {
+        let isSelected = category == selectedCategory
+
+        return Button {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                selectedCategory = category
+            }
+        } label: {
+            VStack(spacing: 6) {
+                Image(systemName: category.iconName)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(isSelected ? Color.white : Theme.primaryColor.opacity(0.85))
+                    .frame(width: 34, height: 34)
+                    .background(
+                        Circle()
+                            .fill(isSelected ? Color.white.opacity(0.2) : Theme.primaryColor.opacity(0.1))
+                    )
+
+                Text(category.title)
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.75)
+                    .foregroundStyle(isSelected ? Color.white : Color.primary.opacity(0.85))
+            }
+            .frame(width: 78)
+            .padding(.vertical, 8)
+            .padding(.horizontal, 4)
+            .background(categoryCapsuleBackground(isSelected: isSelected))
+            .overlay(
+                RoundedRectangle(cornerRadius: 30, style: .continuous)
+                    .stroke(isSelected ? Color.white.opacity(0.2) : Color.primary.opacity(0.08), lineWidth: 1)
+            )
+            .shadow(color: isSelected ? Theme.primaryColor.opacity(0.15) : Color.clear, radius: 8, y: 4)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func categoryCapsuleBackground(isSelected: Bool) -> some View {
+        RoundedRectangle(cornerRadius: 30, style: .continuous)
+            .fill(Color(uiColor: .secondarySystemGroupedBackground))
+            .overlay(
+                RoundedRectangle(cornerRadius: 30, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [Theme.primaryGradientStart, Theme.primaryGradientEnd],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .opacity(isSelected ? 1 : 0)
+            )
+    }
+
+    private func placeholderCard(title: String, message: String, iconName: String) -> some View {
+        RoundedRectangle(cornerRadius: 28, style: .continuous)
+            .fill(Theme.cardBackground)
+            .overlay(
+                VStack(alignment: .leading, spacing: Theme.spacingMedium) {
+                    HStack(spacing: Theme.spacingSmall) {
+                        Image(systemName: iconName)
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundStyle(Theme.primaryColor)
+                            .frame(width: 32, height: 32)
+                            .background(
+                                Circle()
+                                    .fill(Theme.primaryColor.opacity(0.12))
+                            )
+
+                        Text(title)
+                            .font(.headline.weight(.semibold))
+                            .foregroundStyle(Color.primary)
+                    }
+
+                    Text(message)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(Theme.spacingMedium)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .stroke(Theme.primaryColor.opacity(0.08), lineWidth: 1)
+            )
+    }
+
+    private var searchFeedback: some View {
+        let trimmed = viewModel.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return VStack(alignment: .leading, spacing: Theme.spacingSmall) {
+            if trimmed.isEmpty {
+                Text("Search by username or display name to connect with new collaborators.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else if trimmed.count < 2 {
+                Text("Keep typing — enter at least two characters to see results.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } else if viewModel.isSearchingUsers {
@@ -77,7 +282,7 @@ struct StudioListView: View {
                     .font(.footnote)
                     .foregroundStyle(Color.red)
             } else if viewModel.userResults.isEmpty {
-                Text("No matching users yet. Try a different name or handle.")
+                Text("No matches yet. Try another name or handle.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } else {
@@ -87,33 +292,30 @@ struct StudioListView: View {
                             profileDestination(for: profile)
                         } label: {
                             UserSearchRow(profile: profile)
+                                .padding(.vertical, 6)
                         }
                         .buttonStyle(.plain)
 
                         if index < viewModel.userResults.count - 1 {
                             Divider()
-                                .padding(.leading, 56)
+                                .padding(.leading, 52)
                         }
                     }
                 }
                 .padding(.top, Theme.spacingSmall)
             }
         }
-        .padding(Theme.spacingLarge)
-        .background(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(Theme.cardBackground)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .stroke(Theme.primaryColor.opacity(0.12), lineWidth: 1)
-        )
+        .padding(.top, Theme.spacingSmall)
     }
 
     private var userSearchField: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(LinearGradient(
+                    colors: [Theme.primaryGradientStart, Theme.primaryGradientEnd],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                ))
 
             TextField("Search people", text: $viewModel.searchQuery)
                 .textInputAutocapitalization(.never)
@@ -138,8 +340,8 @@ struct StudioListView: View {
                 .accessibilityLabel("Clear search")
             }
         }
-        .padding(.vertical, 10)
-        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .padding(.horizontal, 10)
         .background(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(Color(uiColor: .secondarySystemBackground))
@@ -148,43 +350,63 @@ struct StudioListView: View {
 
     @ViewBuilder
     private func profileDestination(for profile: UserProfile) -> some View {
-        switch profile.accountType {
-        case .artist:
-            ArtistDetailView(artistId: profile.id, profile: profile)
-        case .engineer:
+        if profile.accountType.isEngineer {
             EngineerDetailView(engineerId: profile.id, profile: profile)
-        case .studioOwner:
+        } else if profile.accountType.isStudioOwner {
             if let studio = viewModel.studios.first(where: { $0.ownerId == profile.id }) {
                 StudioDetailView(studio: studio)
             } else {
                 StudioOwnerProfilePlaceholder(profile: profile)
             }
+        } else {
+            ArtistDetailView(artistId: profile.id, profile: profile)
         }
     }
 
+    private var studioGridColumns: [GridItem] {
+        [
+            GridItem(.adaptive(minimum: 150, maximum: 220), spacing: Theme.spacingSmall)
+        ]
+    }
+
     private var studiosSection: some View {
-        VStack(alignment: .leading, spacing: Theme.spacingMedium) {
-            HStack {
+        VStack(alignment: .leading, spacing: Theme.spacingSmall) {
+            HStack(alignment: .firstTextBaseline) {
                 Text("Studios")
-                    .font(.headline.weight(.semibold))
+                    .font(.system(size: 18, weight: .semibold, design: .rounded))
                 Spacer()
                 if !viewModel.studios.isEmpty {
                     Text("\(viewModel.studios.count) available")
-                        .font(.footnote)
+                        .font(.footnote.weight(.medium))
                         .foregroundStyle(.secondary)
                 }
             }
             .padding(.horizontal, Theme.spacingSmall)
-            .padding(.bottom, Theme.spacingSmall)
 
             if viewModel.isLoading && viewModel.studios.isEmpty {
-                loadingCard
+                VStack(spacing: Theme.spacingSmall) {
+                    HStack(spacing: Theme.spacingSmall) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Loading studios…")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    LazyVGrid(columns: studioGridColumns, alignment: .center, spacing: Theme.spacingMedium) {
+                        ForEach(0..<4, id: \.self) { _ in
+                            StudioCardPlaceholder()
+                        }
+                    }
+                    .padding(.leading, Theme.spacingMedium)
+                }
+                .padding(.top, Theme.spacingSmall)
             } else if let errorMessage = viewModel.errorMessage {
                 errorCard(message: errorMessage)
             } else if viewModel.studios.isEmpty {
                 emptyStateCard
             } else {
-                VStack(spacing: Theme.spacingXLarge) {
+                LazyVGrid(columns: studioGridColumns, alignment: .center, spacing: Theme.spacingMedium) {
                     ForEach(viewModel.studios) { studio in
                         NavigationLink {
                             StudioDetailView(studio: studio)
@@ -194,28 +416,10 @@ struct StudioListView: View {
                         .buttonStyle(.plain)
                     }
                 }
-                .padding(.top, Theme.spacingXLarge)
+                .padding(.leading, Theme.spacingMedium)
+                .padding(.top, Theme.spacingSmall)
             }
         }
-    }
-
-    private var loadingCard: some View {
-        RoundedRectangle(cornerRadius: 24, style: .continuous)
-            .fill(Theme.cardBackground)
-            .overlay(
-                VStack(spacing: Theme.spacingSmall) {
-                    ProgressView()
-                    Text("Loading studios…")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            )
-            .frame(maxWidth: .infinity)
-            .frame(height: 140)
-            .overlay(
-                RoundedRectangle(cornerRadius: 24, style: .continuous)
-                    .stroke(Theme.primaryColor.opacity(0.1), lineWidth: 1)
-            )
     }
 
     private func errorCard(message: String) -> some View {
@@ -236,6 +440,7 @@ struct StudioListView: View {
                 RoundedRectangle(cornerRadius: 24, style: .continuous)
                     .stroke(Theme.primaryColor.opacity(0.1), lineWidth: 1)
             )
+            .frame(maxWidth: .infinity)
     }
 
     private var emptyStateCard: some View {
@@ -256,14 +461,7 @@ struct StudioListView: View {
                 RoundedRectangle(cornerRadius: 24, style: .continuous)
                     .stroke(Theme.primaryColor.opacity(0.1), lineWidth: 1)
             )
-    }
-
-    private var heroGradient: LinearGradient {
-        LinearGradient(
-            colors: [Theme.primaryGradientStart, Theme.primaryGradientEnd],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
+            .frame(maxWidth: .infinity)
     }
 
     @MainActor
@@ -280,129 +478,304 @@ struct StudioListView: View {
 
 }
 
+private enum DiscoveryCategory: String, CaseIterable, Identifiable, Hashable {
+    case studios
+    case engineers
+    case producers
+    case djs
+    case videographers
+    case photographers
+    case eventCenters
+    case podcasts
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .studios: return "Studios"
+        case .engineers: return "Engineers"
+        case .producers: return "Producers"
+        case .djs: return "DJs"
+        case .videographers: return "Videographers"
+        case .photographers: return "Photographers"
+        case .eventCenters: return "Event Centers"
+        case .podcasts: return "Podcasts"
+        }
+    }
+
+    var iconName: String {
+        switch self {
+        case .studios: return "music.note.house"
+        case .engineers: return "wrench.and.screwdriver"
+        case .producers: return "headphones"
+        case .djs: return "music.quarternote.3"
+        case .videographers: return "video.fill"
+        case .photographers: return "camera.fill"
+        case .eventCenters: return "building.2.fill"
+        case .podcasts: return "mic.fill"
+        }
+    }
+
+    var placeholderTitle: String {
+        switch self {
+        case .studios: return "Studios"
+        case .engineers: return "Engineer discovery"
+        case .producers: return "Producer discovery"
+        case .djs: return "DJ spotlight"
+        case .videographers: return "Videographer showcase"
+        case .photographers: return "Photographer showcase"
+        case .eventCenters: return "Event centers"
+        case .podcasts: return "Podcast studios"
+        }
+    }
+
+    var placeholderMessage: String {
+        switch self {
+        case .studios:
+            return "Explore listed studios ready for collaboration."
+        case .engineers:
+            return "Browse curated engineers soon. We're preparing tailored recommendations."
+        case .producers:
+            return "Producer profiles are coming next. Check back for new talent."
+        case .djs:
+            return "We’re lining up DJs you can book for events and sessions. Stay tuned."
+        case .videographers:
+            return "Soon you’ll be able to discover videographers to capture your next project."
+        case .photographers:
+            return "Photographers are almost here. We’ll showcase creatives available to shoot."
+        case .eventCenters:
+            return "Find event-friendly spaces and venues once this hub goes live."
+        case .podcasts:
+            return "Podcast studios and hosts will appear here as we expand discovery."
+        }
+    }
+
+    func next() -> DiscoveryCategory {
+        guard let currentIndex = Self.allCases.firstIndex(of: self) else { return self }
+        let nextIndex = Self.allCases.index(after: currentIndex)
+        return nextIndex < Self.allCases.endIndex ? Self.allCases[nextIndex] : Self.allCases.first ?? self
+    }
+
+    func previous() -> DiscoveryCategory {
+        guard let currentIndex = Self.allCases.firstIndex(of: self) else { return self }
+        return currentIndex == Self.allCases.startIndex
+            ? Self.allCases.last ?? self
+            : Self.allCases[Self.allCases.index(before: currentIndex)]
+    }
+}
+
+private enum CategoryDirection {
+    case next
+    case previous
+}
+
 private struct StudioCard: View {
     let studio: Studio
 
     var body: some View {
-        ZStack(alignment: .bottomLeading) {
-            backgroundContent
-                .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 28, style: .continuous)
-                        .stroke(Theme.primaryColor.opacity(0.08), lineWidth: 1)
-                )
-                .shadow(color: Color.black.opacity(0.12), radius: 16, x: 0, y: 10)
+        VStack(alignment: .leading, spacing: 10) {
+            coverImage
 
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(studio.name)
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(.white)
-                Text(studio.city)
-                    .font(.footnote)
-                    .foregroundStyle(.white.opacity(0.85))
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color.primary)
+                    .lineLimit(2)
 
-                HStack(spacing: 8) {
-                    if let rate = studio.hourlyRate {
-                        infoTag(text: String(format: "$%.0f/hr", rate))
-                    }
-                    if let rooms = studio.rooms {
-                        infoTag(text: "\(rooms) room\(rooms == 1 ? "" : "s")")
-                    }
-                    if studio.amenities.isEmpty == false {
-                        infoTag(text: "\(studio.amenities.count) amenit\(studio.amenities.count == 1 ? "y" : "ies")")
-                    }
+                Text(studio.city)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                infoRow
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(Theme.cardBackground)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .stroke(Theme.primaryColor.opacity(0.08), lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.04), radius: 6, y: 4)
+        .frame(maxWidth: .infinity, alignment: .center)
+    }
+
+    @ViewBuilder
+    private var infoRow: some View {
+        if !infoItems.isEmpty {
+            HStack(spacing: 4) {
+                ForEach(Array(infoItems.enumerated()), id: \.offset) { _, item in
+                    infoBadge(title: item.title, systemImage: item.systemImage)
                 }
             }
-            .padding(Theme.spacingLarge)
         }
-        .overlay(alignment: .topLeading) {
+    }
+
+    private var infoItems: [(title: String, systemImage: String)] {
+        var items: [(String, String)] = []
+        if let rate = studio.hourlyRate {
+            items.append((String(format: "$%.0f/hr", rate), "dollarsign.circle"))
+        }
+        if let rooms = studio.rooms {
+            items.append(("\(rooms) room\(rooms == 1 ? "" : "s")", "music.note.house"))
+        }
+        if studio.amenities.isEmpty == false {
+            items.append(("\(studio.amenities.count) amenit\(studio.amenities.count == 1 ? "y" : "ies")", "sparkles"))
+        }
+        return Array(items.prefix(2))
+    }
+
+    private var coverImage: some View {
+        ZStack(alignment: .topLeading) {
+            coverAsset
+
             if let logoURL = studio.logoImageURL {
-                AsyncImage(url: logoURL) { phase in
+                logoThumbnail(url: logoURL)
+                    .padding(8)
+            }
+        }
+        .frame(height: 110)
+        .frame(maxWidth: .infinity)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.black.opacity(0.05), lineWidth: 0.8)
+        )
+    }
+
+    private var coverAsset: some View {
+        ZStack {
+            placeholderCover
+
+            if let coverURL = studio.coverImageURL {
+                AsyncImage(url: coverURL) { phase in
                     switch phase {
                     case .empty:
-                        ProgressView()
-                            .progressViewStyle(.circular)
+                        Color.clear
                     case .success(let image):
                         image
                             .resizable()
-                            .scaledToFit()
+                            .scaledToFill()
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .clipped()
                     case .failure:
-                        logoFallback
+                        Color.clear
                     @unknown default:
-                        logoFallback
+                        Color.clear
                     }
                 }
-                .frame(width: 54, height: 54)
-                .background(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(.ultraThinMaterial)
-                )
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .padding(Theme.spacingMedium)
             }
         }
-        .frame(height: 200)
+        .frame(height: 110)
+        .frame(maxWidth: .infinity)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            LinearGradient(
+                colors: [Color.black.opacity(0.12), Color.black.opacity(0.02)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        )
     }
 
-    private var logoFallback: some View {
-        Image(systemName: "music.note.house")
+    private func logoThumbnail(url: URL) -> some View {
+        AsyncImage(url: url) { phase in
+            switch phase {
+            case .empty:
+                ProgressView()
+                    .progressViewStyle(.circular)
+            case .success(let image):
+                image
+                    .resizable()
+                    .scaledToFit()
+            case .failure:
+                fallbackLogo
+            @unknown default:
+                fallbackLogo
+            }
+        }
+        .frame(width: 36, height: 36)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.white.opacity(0.92))
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .shadow(color: Color.black.opacity(0.08), radius: 6, y: 4)
+    }
+
+    private var fallbackLogo: some View {
+        Image(systemName: "waveform.and.mic")
             .resizable()
             .scaledToFit()
-            .padding(12)
+            .padding(8)
             .foregroundStyle(Theme.primaryColor)
     }
 
-    @ViewBuilder
-    private var backgroundContent: some View {
-        GeometryReader { proxy in
-            ZStack {
-                if let cover = studio.coverImageURL {
-                    AsyncImage(url: cover) { phase in
-                        backgroundImage(for: phase)
-                    }
-                } else {
-                    placeholderBackground
-                }
-            }
-            .frame(width: proxy.size.width, height: proxy.size.height)
-            .clipped()
-        }
-    }
-
-    @ViewBuilder
-    private func backgroundImage(for phase: AsyncImagePhase) -> some View {
-        switch phase {
-        case .empty:
-            placeholderBackground
-        case .success(let image):
-            image
-                .resizable()
-                .scaledToFill()
-                .overlay(LinearGradient(colors: [.black.opacity(0.55), .black.opacity(0.25), .clear], startPoint: .bottom, endPoint: .top))
-        case .failure:
-            placeholderBackground
-        @unknown default:
-            placeholderBackground
-        }
-    }
-
-    private var placeholderBackground: some View {
+    private var placeholderCover: some View {
         LinearGradient(
-            colors: [Theme.primaryGradientStart, Theme.primaryGradientEnd],
+            colors: [
+                Theme.primaryGradientStart.opacity(0.85),
+                Theme.primaryGradientEnd.opacity(0.85)
+            ],
             startPoint: .topLeading,
             endPoint: .bottomTrailing
         )
     }
 
-    private func infoTag(text: String) -> some View {
-        Text(text)
-            .font(.caption.weight(.semibold))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(
-                Capsule()
-                    .fill(Color.white.opacity(0.15))
-            )
+    private func infoBadge(title: String, systemImage: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: systemImage)
+            Text(title)
+        }
+        .font(.caption2.weight(.semibold))
+        .foregroundStyle(Color.primary.opacity(0.85))
+        .padding(.vertical, 5)
+        .padding(.horizontal, 8)
+        .background(
+            Capsule()
+                .fill(Color(uiColor: .secondarySystemBackground))
+        )
+    }
+}
+
+private struct StudioCardPlaceholder: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color(uiColor: .tertiarySystemFill))
+                .frame(height: 110)
+                .frame(maxWidth: .infinity)
+
+            VStack(alignment: .leading, spacing: 6) {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color(uiColor: .tertiarySystemFill))
+                    .frame(height: 10)
+
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color(uiColor: .tertiarySystemFill))
+                    .frame(width: 90, height: 9)
+
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color(uiColor: .tertiarySystemFill))
+                    .frame(width: 60, height: 7)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(Theme.cardBackground)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .stroke(Theme.primaryColor.opacity(0.05), lineWidth: 1)
+        )
+        .redacted(reason: .placeholder)
+        .frame(maxWidth: .infinity, alignment: .center)
     }
 }
 
@@ -433,12 +806,12 @@ private struct UserSearchRow: View {
                 .font(.caption.weight(.bold))
                 .foregroundStyle(Color(.tertiaryLabel))
         }
-        .padding(.vertical, 10)
+        .padding(.vertical, 8)
     }
 
     private var avatar: some View {
         avatarContent
-            .frame(width: 44, height: 44)
+            .frame(width: 40, height: 40)
             .clipShape(Circle())
             .overlay(
                 Circle()
@@ -512,7 +885,7 @@ private struct StudioOwnerProfilePlaceholder: View {
             .frame(maxWidth: .infinity)
             .padding(Theme.spacingLarge)
         }
-        .background(Color(uiColor: .systemGroupedBackground))
+        .background(Theme.appBackground)
         .navigationTitle(profile.displayName.isEmpty ? profile.username : profile.displayName)
         .navigationBarTitleDisplayMode(.inline)
     }

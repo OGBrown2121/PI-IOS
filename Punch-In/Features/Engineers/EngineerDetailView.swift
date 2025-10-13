@@ -5,6 +5,7 @@ struct EngineerDetailView: View {
     @EnvironmentObject private var appState: AppState
 
     let engineerId: String
+    private let heroStyle: HeroStyle
 
     @State private var profile: UserProfile?
     @State private var isLoading = false
@@ -22,9 +23,17 @@ struct EngineerDetailView: View {
     @State private var isLoadingFollowStats = true
     @State private var isUpdatingFollow = false
     @State private var followErrorMessage: String?
+    @State private var mediaItems: [ProfileMediaItem] = []
+    @State private var isLoadingMediaLibrary = false
+    @State private var mediaErrorMessage: String?
+    @State private var presentedFollowList: FollowConnectionsKind?
+    @State private var isShowingReportSheet = false
+    @State private var reportToastMessage: String?
+    @State private var reportToastTask: Task<Void, Never>?
 
-    init(engineerId: String, profile: UserProfile? = nil) {
+    init(engineerId: String, profile: UserProfile? = nil, heroStyle: HeroStyle = .standard) {
         self.engineerId = engineerId
+        self.heroStyle = heroStyle
         _profile = State(initialValue: profile)
     }
 
@@ -34,6 +43,9 @@ struct EngineerDetailView: View {
                 ScrollView(.vertical, showsIndicators: false) {
                     VStack(alignment: .leading, spacing: Theme.spacingLarge) {
                         heroSection(for: profile)
+                        if profile.accountType.supportsProfileMediaLibrary {
+                            mediaSection(for: profile)
+                        }
                         if profile.profileDetails.upcomingProjects.isEmpty == false {
                             ProfileSpotlightSection(
                                 title: "Pinned Projects",
@@ -67,7 +79,7 @@ struct EngineerDetailView: View {
                     }
                     .padding(Theme.spacingLarge)
                 }
-                .background(Color(uiColor: .systemBackground))
+                .background(Theme.appBackground)
                 .navigationTitle(profile.displayName.isEmpty ? profile.username : profile.displayName)
                 .navigationBarTitleDisplayMode(.inline)
             } else if isLoading {
@@ -90,6 +102,27 @@ struct EngineerDetailView: View {
             await loadStudiosIfNeeded()
             await loadReviews()
         }
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                if let profile,
+                   let currentUser = appState.currentUser,
+                   currentUser.id != profile.id {
+                    Menu {
+                        Button(role: .destructive) {
+                            isShowingReportSheet = true
+                        } label: {
+                            let name = profile.displayName.isEmpty ? profile.username : profile.displayName
+                            Label("Report \(name)", systemImage: "flag")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                            .font(.title3)
+                            .foregroundStyle(.secondary)
+                    }
+                    .accessibilityLabel("More actions")
+                }
+            }
+        }
         .sheet(isPresented: $isBookingPresented) {
             if let studio = selectedStudio, let profile {
                 BookingFlowView(
@@ -100,6 +133,44 @@ struct EngineerDetailView: View {
                     currentUserProvider: { appState.currentUser }
                 )
             }
+        }
+        .sheet(item: $presentedFollowList) { kind in
+            NavigationStack {
+                if let profile = self.profile {
+                    FollowConnectionsView(
+                        userId: profile.id,
+                        kind: kind,
+                        firestoreService: di.firestoreService
+                    )
+                } else {
+                    ProgressView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .environment(\.di, di)
+            .environmentObject(appState)
+        }
+        .sheet(isPresented: $isShowingReportSheet) {
+            if let profile {
+                ReportUserView(
+                    viewModel: ReportUserViewModel(
+                        reportedUser: profile,
+                        reportService: di.reportService,
+                        currentUserProvider: { appState.currentUser }
+                    ),
+                    onSubmitted: {
+                        showReportToast("Thanks for letting us know.")
+                    }
+                )
+            } else {
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .toast(message: $reportToastMessage, bottomInset: 120)
+        .onDisappear {
+            reportToastTask?.cancel()
+            reportToastTask = nil
         }
         .confirmationDialog("Choose a studio", isPresented: $isSelectingStudio, actions: {
             ForEach(availableStudios) { studio in
@@ -112,17 +183,51 @@ struct EngineerDetailView: View {
         })
     }
 
-    private enum EngineerHeroMetrics {
-        static let avatarSize: CGFloat = 88
-        static let cardCornerRadius: CGFloat = 26
-        static let horizontalPadding: CGFloat = Theme.spacingLarge
-        static let verticalPadding: CGFloat = Theme.spacingMedium * CGFloat(0.85)
-        static let shadowRadius: CGFloat = 6
-        static let shadowYOffset: CGFloat = 4
+    struct EngineerHeroMetrics {
+        let avatarSize: CGFloat
+        let cardCornerRadius: CGFloat
+        let horizontalPadding: CGFloat
+        let verticalPadding: CGFloat
+        let shadowRadius: CGFloat
+        let shadowYOffset: CGFloat
+
+        static let standard = EngineerHeroMetrics(
+            avatarSize: 88,
+            cardCornerRadius: 26,
+            horizontalPadding: Theme.spacingLarge,
+            verticalPadding: Theme.spacingMedium * 0.85,
+            shadowRadius: 6,
+            shadowYOffset: 4
+        )
+
+        static let compact = EngineerHeroMetrics(
+            avatarSize: 72,
+            cardCornerRadius: 24,
+            horizontalPadding: Theme.spacingMedium,
+            verticalPadding: Theme.spacingMedium * 0.55,
+            shadowRadius: 4,
+            shadowYOffset: 2
+        )
+    }
+
+    enum HeroStyle {
+        case standard
+        case compact
+
+        var metrics: EngineerHeroMetrics {
+            switch self {
+            case .standard:
+                return .standard
+            case .compact:
+                return .compact
+            }
+        }
     }
 
     private func heroSection(for profile: UserProfile) -> some View {
-        VStack(spacing: Theme.spacingSmall * CGFloat(0.8)) {
+        let metrics = heroStyle.metrics
+
+        return VStack(spacing: Theme.spacingSmall * CGFloat(0.8)) {
             avatar(for: profile)
                 .padding(.bottom, Theme.spacingSmall)
 
@@ -159,22 +264,63 @@ struct EngineerDetailView: View {
             followSummarySection(for: profile)
         }
         .frame(maxWidth: .infinity)
-        .padding(.horizontal, EngineerHeroMetrics.horizontalPadding)
-        .padding(.vertical, EngineerHeroMetrics.verticalPadding)
+        .padding(.horizontal, metrics.horizontalPadding)
+        .padding(.vertical, metrics.verticalPadding)
         .background(
-            RoundedRectangle(cornerRadius: EngineerHeroMetrics.cardCornerRadius, style: .continuous)
+            RoundedRectangle(cornerRadius: metrics.cardCornerRadius, style: .continuous)
                 .fill(heroGradient)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: EngineerHeroMetrics.cardCornerRadius, style: .continuous)
+            RoundedRectangle(cornerRadius: metrics.cardCornerRadius, style: .continuous)
                 .stroke(.white.opacity(0.15), lineWidth: 1)
         )
         .shadow(
             color: Theme.primaryColor.opacity(0.18),
-            radius: EngineerHeroMetrics.shadowRadius,
+            radius: metrics.shadowRadius,
             x: 0,
-            y: EngineerHeroMetrics.shadowYOffset
+            y: metrics.shadowYOffset
         )
+    }
+
+    private func mediaSection(for profile: UserProfile) -> some View {
+        VStack(alignment: .leading, spacing: Theme.spacingMedium) {
+            if isLoadingMediaLibrary {
+                ProgressView("Loading featured masters…")
+                    .progressViewStyle(.circular)
+            } else if let message = mediaErrorMessage {
+                Label(message, systemImage: "exclamationmark.triangle")
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            } else if mediaItems.isEmpty {
+                Text("Uploads you publish will surface here for artists and studios.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else {
+                let pinned = mediaItems.filter { $0.isPinned }
+                let other = mediaItems.filter { $0.isPinned == false }
+
+                if pinned.isEmpty == false {
+                    ProfileMediaShowcaseSection(
+                        title: profile.mediaCapabilities.pinnedSectionTitle,
+                        icon: "star.fill",
+                        accentColor: Color.blue,
+                        items: pinned
+                    )
+                }
+
+                if other.isEmpty == false {
+                    ProfileMediaShowcaseSection(
+                        title: "Recent masters",
+                        icon: "waveform",
+                        accentColor: Color.blue,
+                        items: Array(other.prefix(6))
+                    )
+                }
+            }
+        }
+        .task {
+            await loadMediaIfNeeded(for: profile)
+        }
     }
 
     private func followSummarySection(for profile: UserProfile) -> some View {
@@ -185,8 +331,16 @@ struct EngineerDetailView: View {
                     .tint(.white)
             } else {
                 HStack(spacing: Theme.spacingMedium) {
-                    followMetricView(count: followStats.followersCount, label: followersLabel)
-                    followMetricView(count: followStats.followingCount, label: "Following")
+                    followMetricButton(
+                        count: followStats.followersCount,
+                        label: followersLabel,
+                        kind: .followers
+                    )
+                    followMetricButton(
+                        count: followStats.followingCount,
+                        label: "Following",
+                        kind: .following
+                    )
                 }
             }
 
@@ -245,6 +399,16 @@ struct EngineerDetailView: View {
                 .foregroundStyle(.white.opacity(0.75))
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private func followMetricButton(count: Int, label: String, kind: FollowConnectionsKind) -> some View {
+        Button {
+            presentedFollowList = kind
+        } label: {
+            followMetricView(count: count, label: label)
+        }
+        .buttonStyle(.plain)
+        .disabled(isLoadingFollowStats)
     }
 
     private var followersLabel: String {
@@ -445,11 +609,25 @@ struct EngineerDetailView: View {
 
     private var canCurrentUserBook: Bool {
         guard let user = appState.currentUser else { return false }
-        return user.accountType == .artist
+        return user.accountType.canInitiateBookings
+    }
+
+    @MainActor
+    private func showReportToast(_ message: String) {
+        reportToastTask?.cancel()
+        withAnimation { reportToastMessage = message }
+        reportToastTask = Task {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            await MainActor.run {
+                withAnimation { reportToastMessage = nil }
+            }
+        }
     }
 
     private func avatar(for profile: UserProfile) -> some View {
-        Group {
+        let metrics = heroStyle.metrics
+
+        return Group {
             if let imageURL = profile.profileImageURL {
                 AsyncImage(url: imageURL) { phase in
                     switch phase {
@@ -469,7 +647,7 @@ struct EngineerDetailView: View {
                 placeholderAvatar(for: profile)
             }
         }
-        .frame(width: EngineerHeroMetrics.avatarSize, height: EngineerHeroMetrics.avatarSize)
+        .frame(width: metrics.avatarSize, height: metrics.avatarSize)
         .clipShape(Circle())
         .overlay(
             Circle()
@@ -613,11 +791,31 @@ struct EngineerDetailView: View {
             profile = try await di.firestoreService.loadUserProfile(for: engineerId)
             if profile == nil {
                 errorMessage = "We couldn't find this engineer."
+            } else if let loaded = profile, loaded.accountType.supportsProfileMediaLibrary {
+                await loadMedia(for: loaded)
             }
         } catch {
             errorMessage = error.localizedDescription
         }
         isLoading = false
+    }
+
+    private func loadMediaIfNeeded(for profile: UserProfile) async {
+        guard mediaItems.isEmpty else { return }
+        await loadMedia(for: profile)
+    }
+
+    private func loadMedia(for profile: UserProfile) async {
+        guard isLoadingMediaLibrary == false else { return }
+        isLoadingMediaLibrary = true
+        defer { isLoadingMediaLibrary = false }
+        do {
+            let items = try await di.firestoreService.fetchProfileMedia(for: profile.id)
+            mediaItems = items.filter(\.isShared)
+            mediaErrorMessage = nil
+        } catch {
+            mediaErrorMessage = error.localizedDescription
+        }
     }
 }
 

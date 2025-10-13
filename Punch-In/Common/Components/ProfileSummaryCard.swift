@@ -173,5 +173,5 @@ struct ProfileSummaryCard: View {
 #Preview("Profile Summary") {
     ProfileSummaryCard(profile: .mock)
         .padding()
-        .background(Color(uiColor: .systemGroupedBackground))
+        .background(Theme.appBackground)
 }

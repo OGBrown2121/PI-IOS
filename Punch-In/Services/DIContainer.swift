@@ -8,11 +8,13 @@ import SwiftUI
 struct DIContainer {
     let authService: any AuthService
     let firestoreService: any FirestoreService
+    let alertsService: any AlertsService
     let storageService: any StorageService
     let paymentsService: any PaymentsService
     let chatService: any ChatService
     let bookingService: any BookingService
     let reviewService: any ReviewService
+    let reportService: any ReportService
 
     @MainActor
     static func makeDefault() -> DIContainer {
@@ -24,19 +26,22 @@ struct DIContainer {
             return makeMock()
         }
 
-        let firestore = FirebaseFirestoreService()
+        let firestoreBackend = Firestore.firestore()
+        let firestore = FirebaseFirestoreService(database: firestoreBackend)
         return DIContainer(
             authService: FirebaseAuthService(),
             firestoreService: firestore,
+            alertsService: FirebaseAlertsService(database: firestoreBackend),
             storageService: FirebaseStorageService(),
             paymentsService: MockPaymentsService(),
             chatService: FirestoreChatService(
-                firestore: Firestore.firestore(),
+                firestore: firestoreBackend,
                 storage: Storage.storage(),
                 currentUserId: { Auth.auth().currentUser?.uid }
             ),
             bookingService: DefaultBookingService(firestore: firestore),
-            reviewService: DefaultReviewService(firestore: firestore)
+            reviewService: DefaultReviewService(firestore: firestore),
+            reportService: DefaultReportService(firestore: firestore)
         )
     }
 
@@ -46,11 +51,13 @@ struct DIContainer {
         return DIContainer(
             authService: MockAuthService(),
             firestoreService: firestore,
+            alertsService: MockAlertsService.preview(),
             storageService: MockStorageService(),
             paymentsService: MockPaymentsService(),
             chatService: MockChatService(),
             bookingService: DefaultBookingService(firestore: firestore),
-            reviewService: DefaultReviewService(firestore: firestore)
+            reviewService: DefaultReviewService(firestore: firestore),
+            reportService: DefaultReportService(firestore: firestore)
         )
     }
 }

@@ -239,3 +239,9 @@ extension ChatThread {
         return [groupThread, studioThread, directThread]
     }
 }
+
+extension ChatThread: Hashable {
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+}

@@ -8,19 +8,27 @@ final class OnboardingViewModel: ObservableObject {
     @Published var selectedAccountType: AccountType = .artist {
         didSet {
             guard selectedAccountType != oldValue else { return }
-            syncPrimaryOptionsFromStoredValue()
 
-            if selectedAccountType == .studioOwner && oldValue != .studioOwner {
-                selectedPrimaryOptions = []
-                fieldOne = ""
-                fieldTwo = ""
+            if selectedAccountType.profileFieldStyle == .location {
+                if oldValue.profileFieldStyle != .location {
+                    selectedPrimaryOptions = []
+                    fieldOne = ""
+                    fieldTwo = ""
+                } else if selectedAccountType != oldValue {
+                    fieldOne = ""
+                    fieldTwo = ""
+                }
+            } else {
+                if oldValue.profileFieldStyle == .location {
+                    fieldTwo = ""
+                }
+                if selectedAccountType.primaryOptionsCategory != oldValue.primaryOptionsCategory {
+                    selectedPrimaryOptions = []
+                }
+                syncPrimaryOptionsFromStoredValue()
             }
 
-            if oldValue == .studioOwner && selectedAccountType != .studioOwner {
-                fieldTwo = ""
-            }
-
-            if (selectedAccountType == .artist || selectedAccountType == .engineer) && oldValue != selectedAccountType {
+            if selectedAccountType.profileFieldStyle != .location && !selectedAccountType.usesPrimaryOptions {
                 selectedPrimaryOptions = []
             }
         }
@@ -35,7 +43,7 @@ final class OnboardingViewModel: ObservableObject {
     @Published var upcomingEvents: [ProfileSpotlight] = []
     @Published var selectedPrimaryOptions: [String] = [] {
         didSet {
-            if selectedAccountType == .artist || selectedAccountType == .engineer {
+            if selectedAccountType.usesPrimaryOptions {
                 fieldOne = selectedPrimaryOptions.joined(separator: ", ")
             }
         }
@@ -75,11 +83,11 @@ final class OnboardingViewModel: ObservableObject {
         let trimmedUsername = username.trimmed
         let trimmedFieldTwo = fieldTwo.trimmed
         let trimmedBio = publicBio.trimmed
-        switch selectedAccountType {
-        case .studioOwner:
+        switch selectedAccountType.profileFieldStyle {
+        case .location:
             let trimmedFieldOne = fieldOne.trimmed
             return !trimmedUsername.isEmpty && !trimmedFieldOne.isEmpty && !trimmedFieldTwo.isEmpty && !trimmedBio.isEmpty
-        case .artist, .engineer:
+        case .specialties:
             return !trimmedUsername.isEmpty && !selectedPrimaryOptions.isEmpty && !trimmedFieldTwo.isEmpty && !trimmedBio.isEmpty
         }
     }
@@ -98,13 +106,9 @@ final class OnboardingViewModel: ObservableObject {
         didSave = false
 
         let trimmedUsername = username.trimmed
-        let primaryValue: String
-        switch selectedAccountType {
-        case .studioOwner:
-            primaryValue = fieldOne.trimmed
-        case .artist, .engineer:
-            primaryValue = selectedPrimaryOptions.joined(separator: ", ")
-        }
+        let primaryValue: String = selectedAccountType.usesPrimaryOptions
+            ? selectedPrimaryOptions.joined(separator: ", ")
+            : fieldOne.trimmed
 
         var updatedProfile = existingProfile
         updatedProfile.username = trimmedUsername
@@ -172,25 +176,29 @@ final class OnboardingViewModel: ObservableObject {
     }
 
     func primaryOptions(for accountType: AccountType) -> [String] {
-        switch accountType {
-        case .artist, .engineer:
+        guard let category = accountType.primaryOptionsCategory else { return [] }
+        switch category {
+        case .genres:
             return ProfileOptions.genres
-        case .studioOwner:
-            return []
+        case .djStyles:
+            return ProfileOptions.djStyles
+        case .photographySpecialties:
+            return ProfileOptions.photographySpecialties
+        case .videographySpecialties:
+            return ProfileOptions.videographySpecialties
+        case .podcastTopics:
+            return ProfileOptions.podcastTopics
+        case .productionStyles:
+            return ProfileOptions.productionStyles
         }
     }
 
     func primaryOptionsLimit(for accountType: AccountType) -> Int {
-        switch accountType {
-        case .artist, .engineer:
-            return 3
-        case .studioOwner:
-            return 0
-        }
+        accountType.primaryOptionsLimit
     }
 
     private func syncPrimaryOptionsFromStoredValue() {
-        guard selectedAccountType == .artist || selectedAccountType == .engineer else {
+        guard selectedAccountType.usesPrimaryOptions else {
             selectedPrimaryOptions = []
             return
         }

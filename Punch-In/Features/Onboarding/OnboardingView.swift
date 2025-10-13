@@ -67,31 +67,53 @@ struct OnboardingView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: Theme.spacingLarge) {
-                header
+        ZStack(alignment: .top) {
+            onboardingBackground
+                .ignoresSafeArea()
 
-                if let errorMessage = viewModel.errorMessage {
-                    Text(errorMessage)
-                        .font(.footnote)
-                        .foregroundStyle(.red)
+            ScrollView {
+                VStack(alignment: .leading, spacing: Theme.spacingLarge) {
+                    heroHeader
+
+                    if let errorMessage = viewModel.errorMessage {
+                        errorCard(errorMessage)
+                    }
+
+                    accentCard(.warm, title: "Profile basics", systemImage: "person.crop.circle.badge.plus") {
+                        profileImageSection
+                        Divider()
+                            .tint(Color.white.opacity(0.15))
+                        usernameField
+                        accountTypeSection
+                    }
+
+                    accentCard(.cool, title: "Details", systemImage: "slider.horizontal.3") {
+                        primaryFields
+                        Divider()
+                            .tint(Color.white.opacity(0.08))
+                        bioField
+                    }
+
+                    accentCard(.neutral, title: "Spotlights", systemImage: "sparkles") {
+                        upcomingProjectsSection
+                        Divider()
+                            .tint(Color.primary.opacity(0.08))
+                        upcomingEventsSection
+                    }
+
+                    accentCard(.warm, title: "Finish up", systemImage: "checkmark.circle") {
+                        saveButton
+                        if viewModel.isSaving {
+                            ProgressView()
+                                .progressViewStyle(.circular)
+                                .tint(Theme.primaryGradientEnd)
+                                .frame(maxWidth: .infinity, alignment: .center)
+                        }
+                    }
                 }
-
-                profileImageSection
-                usernameField
-                accountTypeSection
-                primaryFields
-                bioField
-                upcomingProjectsSection
-                upcomingEventsSection
-                saveButton
-
-                if viewModel.isSaving {
-                    ProgressView()
-                        .fullWidth()
-                }
+                .padding(.horizontal, Theme.spacingLarge)
+                .padding(.vertical, Theme.spacingXLarge)
             }
-            .padding(Theme.spacingLarge)
         }
         .toolbar {
             if mode == .editing {
@@ -126,19 +148,52 @@ struct OnboardingView: View {
         }
     }
 
-    private var header: some View {
+    private var heroHeader: some View {
         VStack(alignment: .leading, spacing: Theme.spacingSmall) {
             Text(mode.titleText)
-                .font(Theme.headlineFont())
+                .font(.title.bold())
+                .foregroundStyle(.white)
             Text(mode.descriptionText)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.white.opacity(0.85))
         }
+        .padding(.horizontal, Theme.spacingLarge)
+        .padding(.vertical, Theme.spacingLarge)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            LinearGradient(
+                colors: [
+                    Theme.primaryGradientStart.opacity(0.9),
+                    Theme.primaryGradientEnd.opacity(0.85)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .stroke(Color.white.opacity(0.2), lineWidth: 1)
+        )
+        .shadow(color: Theme.primaryGradientEnd.opacity(0.2), radius: 16, x: 0, y: 12)
+    }
+
+    private func errorCard(_ message: String) -> some View {
+        Text(message)
+            .font(.footnote.weight(.semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, Theme.spacingMedium)
+            .padding(.vertical, Theme.spacingSmall)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.red.opacity(0.85))
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .shadow(color: Color.red.opacity(0.28), radius: 16, x: 0, y: 10)
     }
 
     private var profileImageSection: some View {
         VStack(alignment: .leading, spacing: Theme.spacingSmall) {
             Text("Profile photo")
                 .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Color.white.opacity(0.9))
 
             HStack(alignment: .center, spacing: Theme.spacingMedium) {
                 profileImagePreview
@@ -175,11 +230,11 @@ struct OnboardingView: View {
                     if removeProfileImage {
                         Text("The current photo will be removed after you save.")
                             .font(.footnote)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Color.white.opacity(0.75))
                     } else {
                         Text("Shown on your public page. Images up to 8 MB.")
                             .font(.footnote)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Color.white.opacity(0.75))
                     }
                 }
             }
@@ -190,6 +245,7 @@ struct OnboardingView: View {
         VStack(alignment: .leading, spacing: Theme.spacingSmall) {
             Text("Username")
                 .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Color.white.opacity(0.9))
             TextField("Username", text: $viewModel.username)
                 .textFieldStyle(.roundedBorder)
                 .textInputAutocapitalization(.none)
@@ -201,14 +257,25 @@ struct OnboardingView: View {
         VStack(alignment: .leading, spacing: Theme.spacingSmall) {
             Text("Account Type")
                 .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Color.white.opacity(0.9))
 
             if viewModel.canEditAccountType {
-                Picker("Account Type", selection: $viewModel.selectedAccountType) {
+                Menu {
                     ForEach(AccountType.allCases) { type in
-                        Text(type.title).tag(type)
+                        Button {
+                            viewModel.selectedAccountType = type
+                        } label: {
+                            if viewModel.selectedAccountType == type {
+                                Label(type.title, systemImage: "checkmark")
+                            } else {
+                                Text(type.title)
+                            }
+                        }
                     }
+                } label: {
+                    selectorLabel(text: viewModel.selectedAccountType.title, isPlaceholder: false)
                 }
-                .pickerStyle(.segmented)
+                .buttonStyle(.plain)
             } else {
                 Text(viewModel.selectedAccountType.title)
                     .font(.headline)
@@ -216,27 +283,26 @@ struct OnboardingView: View {
 
             Text(viewModel.selectedAccountType.subtitle)
                 .font(.footnote)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.white.opacity(0.75))
         }
     }
 
     @ViewBuilder
     private var primaryFields: some View {
-        switch viewModel.selectedAccountType {
-        case .studioOwner:
-            studioOwnerFields
-        case .artist:
-            artistFields
-        case .engineer:
-            engineerFields
+        switch viewModel.selectedAccountType.profileFieldStyle {
+        case .location:
+            locationFields
+        case .specialties:
+            specialtyFields
         }
     }
 
-    private var studioOwnerFields: some View {
+    private var locationFields: some View {
         VStack(alignment: .leading, spacing: Theme.spacingLarge) {
             VStack(alignment: .leading, spacing: Theme.spacingSmall) {
                 Text(viewModel.fieldOneLabel)
                     .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color.white.opacity(0.9))
                 TextField(viewModel.fieldOneLabel, text: $viewModel.fieldOne)
                     .textFieldStyle(.roundedBorder)
             }
@@ -244,6 +310,7 @@ struct OnboardingView: View {
             VStack(alignment: .leading, spacing: Theme.spacingSmall) {
                 Text(viewModel.fieldTwoLabel)
                     .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color.white.opacity(0.9))
                 Button {
                     activeSheet = .location
                 } label: {
@@ -254,26 +321,16 @@ struct OnboardingView: View {
         }
     }
 
-    private var artistFields: some View {
+    private var specialtyFields: some View {
         VStack(alignment: .leading, spacing: Theme.spacingLarge) {
-            primaryOptionsSelector
-
-            VStack(alignment: .leading, spacing: Theme.spacingSmall) {
-                Text(viewModel.fieldTwoLabel)
-                    .font(.subheadline.weight(.semibold))
-                TextField(viewModel.fieldTwoLabel, text: $viewModel.fieldTwo)
-                    .textFieldStyle(.roundedBorder)
+            if viewModel.selectedAccountType.usesPrimaryOptions {
+                primaryOptionsSelector
             }
-        }
-    }
-
-    private var engineerFields: some View {
-        VStack(alignment: .leading, spacing: Theme.spacingLarge) {
-            primaryOptionsSelector
 
             VStack(alignment: .leading, spacing: Theme.spacingSmall) {
                 Text(viewModel.fieldTwoLabel)
                     .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color.white.opacity(0.9))
                 TextField(viewModel.fieldTwoLabel, text: $viewModel.fieldTwo)
                     .textFieldStyle(.roundedBorder)
             }
@@ -284,15 +341,18 @@ struct OnboardingView: View {
         VStack(alignment: .leading, spacing: Theme.spacingSmall) {
             Text(viewModel.fieldOneLabel)
                 .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Color.white)
             Button {
                 activeSheet = .primaryOptions
             } label: {
                 selectorLabel(text: primaryOptionsDisplayText,
                               isPlaceholder: viewModel.selectedPrimaryOptions.isEmpty)
             }
-            Text("Select up to \(primaryOptionsLimit) options")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+            if primaryOptionsLimit > 0 {
+                Text("Select up to \(primaryOptionsLimit) options")
+                    .font(.footnote)
+                    .foregroundStyle(Color.white.opacity(0.8))
+            }
         }
     }
 
@@ -300,6 +360,7 @@ struct OnboardingView: View {
         VStack(alignment: .leading, spacing: Theme.spacingSmall) {
             Text("Public bio")
                 .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Color.white.opacity(0.9))
             TextField("Tell the community about yourself", text: $viewModel.publicBio, axis: .vertical)
                 .textFieldStyle(.roundedBorder)
         }
@@ -579,12 +640,44 @@ struct OnboardingView: View {
         .padding(Theme.spacingLarge)
         .background(
             RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(Color(uiColor: .secondarySystemBackground))
+                .fill(spotlightBackground(for: category))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                .stroke(spotlightStroke(for: category), lineWidth: 1)
         )
+    }
+
+    private func spotlightBackground(for category: ProfileSpotlight.Category) -> LinearGradient {
+        switch category {
+        case .project:
+            return LinearGradient(
+                colors: [
+                    Theme.primaryGradientStart.opacity(0.16),
+                    Theme.primaryGradientEnd.opacity(0.14)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        case .event:
+            return LinearGradient(
+                colors: [
+                    Color.purple.opacity(0.16),
+                    Color(red: 0.35, green: 0.45, blue: 0.98).opacity(0.14)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        }
+    }
+
+    private func spotlightStroke(for category: ProfileSpotlight.Category) -> Color {
+        switch category {
+        case .project:
+            return Theme.primaryGradientEnd.opacity(0.2)
+        case .event:
+            return Color.purple.opacity(0.24)
+        }
     }
 
     private func dateToggleBinding(for spotlight: Binding<ProfileSpotlight>) -> Binding<Bool> {
@@ -684,15 +777,30 @@ struct OnboardingView: View {
     private func selectorLabel(text: String, isPlaceholder: Bool) -> some View {
         HStack {
             Text(text)
-                .foregroundStyle(isPlaceholder ? .secondary : .primary)
+                .foregroundStyle(isPlaceholder ? Color.white.opacity(0.85) : Color.white)
                 .multilineTextAlignment(.leading)
             Spacer()
             Image(systemName: "chevron.down")
-                .foregroundStyle(.secondary)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.9))
         }
-        .padding(12)
-        .background(Color(uiColor: .secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .padding(.vertical, 10)
+        .padding(.horizontal, 12)
+        .background(
+            LinearGradient(
+                colors: [
+                    Theme.primaryGradientStart.opacity(0.4),
+                    Theme.primaryGradientEnd.opacity(0.4)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.white.opacity(0.25), lineWidth: 1)
+        )
     }
 
     private var primaryOptionsLimit: Int {
@@ -711,14 +819,115 @@ struct OnboardingView: View {
     }
 
     private var primaryOptionsTitle: String {
-        switch viewModel.selectedAccountType {
-        case .artist:
-            return "Select Genres"
-        case .engineer:
-            return "Select Specialties"
-        case .studioOwner:
-            return "Select Options"
+        viewModel.selectedAccountType.primaryOptionsTitle
+    }
+}
+
+private enum AccentCardStyle {
+    case warm
+    case cool
+    case neutral
+
+    var gradient: LinearGradient {
+        switch self {
+        case .warm:
+            return LinearGradient(
+                colors: [
+                    Theme.primaryGradientStart.opacity(0.38),
+                    Theme.primaryGradientEnd.opacity(0.28)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        case .cool:
+            return LinearGradient(
+                colors: [
+                    Color(red: 0.35, green: 0.46, blue: 0.98).opacity(0.32),
+                    Color(red: 0.32, green: 0.3, blue: 0.9).opacity(0.32)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        case .neutral:
+            return LinearGradient(
+                colors: [
+                    Theme.cardBackground.opacity(0.96),
+                    Theme.elevatedCardBackground.opacity(0.98)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
         }
+    }
+
+    var strokeColor: Color {
+        switch self {
+        case .warm:
+            return Theme.primaryGradientEnd.opacity(0.35)
+        case .cool:
+            return Color.blue.opacity(0.25)
+        case .neutral:
+            return Color.black.opacity(0.08)
+        }
+    }
+
+    var titleColor: Color {
+        switch self {
+        case .neutral:
+            return Color.primary
+        default:
+            return Color.white
+        }
+    }
+
+    var shadowColor: Color {
+        switch self {
+        case .warm:
+            return Theme.primaryGradientEnd.opacity(0.22)
+        case .cool:
+            return Color.blue.opacity(0.2)
+        case .neutral:
+            return Color.black.opacity(0.08)
+        }
+    }
+}
+
+private extension OnboardingView {
+    private var onboardingBackground: some View {
+        LinearGradient(
+            colors: [
+                Theme.primaryGradientStart.opacity(0.18),
+                Color(uiColor: .systemBackground),
+                Theme.primaryGradientEnd.opacity(0.14)
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
+
+    @ViewBuilder
+    private func accentCard(
+        _ style: AccentCardStyle,
+        title: String,
+        systemImage: String,
+        @ViewBuilder content: () -> some View
+    ) -> some View {
+        VStack(alignment: .leading, spacing: Theme.spacingMedium) {
+            Label(title, systemImage: systemImage)
+                .font(.headline)
+                .foregroundStyle(style.titleColor)
+                .symbolRenderingMode(.hierarchical)
+            content()
+        }
+        .padding(Theme.spacingLarge)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(style.gradient)
+        .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .stroke(style.strokeColor, lineWidth: 1)
+        )
+        .shadow(color: style.shadowColor, radius: 18, x: 0, y: 12)
     }
 }
 

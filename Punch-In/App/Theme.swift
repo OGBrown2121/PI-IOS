@@ -6,6 +6,7 @@ enum Theme {
     static let secondaryColor = Color.secondary
     static let primaryGradientStart = Color(red: 1.0, green: 0.69, blue: 0.33)
     static let primaryGradientEnd = Color(red: 0.988, green: 0.416, blue: 0.012)
+    static let appBackground = Color("AppBackground")
     static let cardBackground = Color(uiColor: .secondarySystemGroupedBackground)
     static let elevatedCardBackground = Color(uiColor: .tertiarySystemGroupedBackground)
     static let highlightedCardBackground = Color(uiColor: .systemFill)

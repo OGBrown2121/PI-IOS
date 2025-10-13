@@ -22,7 +22,7 @@ struct EngineerRequestsView: View {
             .padding(.horizontal, Theme.spacingLarge)
             .padding(.vertical, Theme.spacingLarge)
         }
-        .background(Color(uiColor: .systemGroupedBackground))
+        .background(Theme.appBackground)
         .navigationTitle("Engineer Requests")
         .navigationBarTitleDisplayMode(.inline)
         .task { await viewModel.loadRequests() }
