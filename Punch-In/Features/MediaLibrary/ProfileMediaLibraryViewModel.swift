@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import UniformTypeIdentifiers
+import UIKit
 
 @MainActor
 final class ProfileMediaLibraryViewModel: ObservableObject {
@@ -271,13 +272,14 @@ final class ProfileMediaLibraryViewModel: ObservableObject {
             progressHandler?(1)
         }
 
-        if let thumbData = draft.thumbnailData {
-            try validateFileSize(bytes: thumbData.count)
+        if let thumbData = draft.thumbnailData,
+           let preparedThumbnail = prepareThumbnailData(thumbData) {
+            try validateFileSize(bytes: preparedThumbnail.count)
             guard let thumbType = draft.thumbnailContentType else {
                 throw MediaLibraryError.missingAsset
             }
             thumbnailURL = try await storageService.uploadFile(
-                data: thumbData,
+                data: preparedThumbnail,
                 path: "users/\(draft.ownerId)/media/\(mediaId)/thumbnail",
                 contentType: thumbType,
                 progress: nil
@@ -314,6 +316,9 @@ final class ProfileMediaLibraryViewModel: ObservableObject {
             ratings: draft.mediaItem?.ratings ?? [:],
             pinnedRank: pinnedRank,
             isShared: draft.isShared || pinnedRank != nil,
+            isRadioEligible: draft.isRadioEligible,
+            primaryGenre: draft.primaryGenre,
+            originState: draft.originState,
             createdAt: createdAt,
             updatedAt: Date()
         )
@@ -338,6 +343,12 @@ final class ProfileMediaLibraryViewModel: ObservableObject {
             throw MediaLibraryError.fileTooLarge(maxBytes: maxFileSizeBytes)
         }
     }
+
+    private func prepareThumbnailData(_ data: Data) -> Data? {
+        guard let image = UIImage(data: data) else { return data }
+        let processed = image.squareArtwork(maxDimension: 800)
+        return processed.jpegData(compressionQuality: 0.85)
+    }
 }
 
 struct ProfileMediaDraft: Identifiable, Equatable {
@@ -356,6 +367,9 @@ struct ProfileMediaDraft: Identifiable, Equatable {
     var isPinned: Bool
     var pinnedRank: Int?
     var isShared: Bool
+    var isRadioEligible: Bool
+    var primaryGenre: MusicGenre?
+    var originState: USState?
     var createdAt: Date?
     var remoteURL: URL?
     var remoteThumbnailURL: URL?
@@ -383,6 +397,9 @@ struct ProfileMediaDraft: Identifiable, Equatable {
         isPinned = mediaItem.isPinned
         pinnedRank = mediaItem.pinnedRank
         isShared = mediaItem.isShared
+        isRadioEligible = mediaItem.isRadioEligible
+        primaryGenre = mediaItem.primaryGenre
+        originState = mediaItem.originState
         createdAt = mediaItem.createdAt
         remoteURL = mediaItem.mediaURL
         remoteThumbnailURL = mediaItem.thumbnailURL
@@ -408,6 +425,9 @@ struct ProfileMediaDraft: Identifiable, Equatable {
         isPinned = false
         pinnedRank = nil
         isShared = true
+        isRadioEligible = false
+        primaryGenre = nil
+        originState = nil
         playCount = 0
     }
 

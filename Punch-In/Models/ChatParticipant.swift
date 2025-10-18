@@ -115,7 +115,8 @@ private extension UserProfile {
             fieldTwo: "Ableton, modular synths"
         ),
         contact: UserContactInfo(),
-        engineerSettings: EngineerSettings()
+        engineerSettings: EngineerSettings(),
+        drivePlan: .subscribed
     )
 
     static let mockWriter = UserProfile(
@@ -131,6 +132,7 @@ private extension UserProfile {
             fieldTwo: "Toplining"
         ),
         contact: UserContactInfo(),
-        engineerSettings: EngineerSettings()
+        engineerSettings: EngineerSettings(),
+        drivePlan: .subscribed
     )
 }

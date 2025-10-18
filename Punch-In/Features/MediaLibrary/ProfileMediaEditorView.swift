@@ -49,6 +49,8 @@ struct ProfileMediaEditorView: View {
     @State private var isImportingFile = false
     @State private var isPresentingCollaboratorPicker = false
     @State private var localErrorMessage: String?
+    @State private var pendingCoverArt: PendingCoverArt?
+    @State private var isShowingCoverCropper = false
 
     let capabilities: ProfileMediaCapabilities
     let onSave: (ProfileMediaDraft) async -> Bool
@@ -74,137 +76,375 @@ struct ProfileMediaEditorView: View {
     }
 
     var body: some View {
-        Form {
-            Section(header: Text("Details")) {
-                TextField("Title", text: $workingDraft.title)
-                TextField("Caption", text: $workingDraft.caption, axis: .vertical)
-                    .lineLimit(2...4)
-
-                Picker("Category", selection: $workingDraft.category) {
-                    ForEach(capabilities.defaultCategories, id: \.self) { category in
-                        Text(category.displayTitle).tag(category)
-                    }
-                    ForEach(otherCategories, id: \.self) { category in
-                        Text(category.displayTitle).tag(category)
-                    }
-                }
-
-                Picker("Format", selection: $workingDraft.format) {
-                    ForEach(capabilities.allowedFormats, id: \.self) { format in
-                        Label(formatLabel(for: format), systemImage: format.iconName)
-                            .tag(format)
-                    }
-                }
-            }
-
-            Section(header: Text("File")) {
-                AttachmentPreview(draft: workingDraft)
-
-                PhotosPicker(
-                    selection: $photoPickerItem,
-                    matching: .any(of: [.images, .videos])
+        ScrollView {
+            VStack(spacing: Theme.spacingLarge) {
+                ProfileMediaEditorSection(
+                    title: "Details",
+                    subtitle: "Set the essentials so listeners know what they're about to play.",
+                    icon: "square.and.pencil"
                 ) {
-                    Label("Select Photo or Video", systemImage: "photo.on.rectangle")
-                }
+                    VStack(spacing: Theme.spacingMedium) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ProfileMediaEditorLabel(title: "Title", systemImage: "textformat")
+                            ProfileMediaEditorControlSurface {
+                                TextField("Add a title", text: $workingDraft.title)
+                                    .textFieldStyle(.plain)
+                                    .font(.callout.weight(.semibold))
+                                    .textInputAutocapitalization(.words)
+                            }
+                        }
 
-                Button {
-                    isImportingFile = true
-                } label: {
-                    Label("Import Audio or Document", systemImage: "waveform.badge.plus")
-                }
+                        VStack(alignment: .leading, spacing: 8) {
+                            ProfileMediaEditorLabel(title: "Caption", systemImage: "text.alignleft")
+                            ProfileMediaEditorControlSurface {
+                                TextField("Share context or lyrics", text: $workingDraft.caption, axis: .vertical)
+                                    .textFieldStyle(.plain)
+                                    .font(.callout)
+                                    .lineLimit(2...4)
+                                    .multilineTextAlignment(.leading)
+                                    .textInputAutocapitalization(.sentences)
+                            }
+                        }
 
-                if uploadManager.activeUpload != nil && workingDraft.requiresAssetUpload {
-                    Text("Finish the current upload before starting another.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            }
+                        VStack(alignment: .leading, spacing: 8) {
+                            ProfileMediaEditorLabel(title: "Category", systemImage: "tag")
+                            Menu {
+                                ForEach(capabilities.defaultCategories, id: \.self) { category in
+                                    categoryMenuButton(for: category)
+                                }
+                                if otherCategories.isEmpty == false {
+                                    Divider()
+                                    ForEach(otherCategories, id: \.self) { category in
+                                        categoryMenuButton(for: category)
+                                    }
+                                }
+                            } label: {
+                                ProfileMediaEditorControlSurface {
+                                    ProfileMediaEditorMenuLabel(
+                                        title: workingDraft.category.displayTitle,
+                                        icon: "tag"
+                                    )
+                                }
+                            }
+                        }
 
-            if workingDraft.format == .audio {
-                Section("Artwork") {
-                    HStack(spacing: 12) {
-                        coverArtPreview
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("Display artwork")
-                                .font(.subheadline.weight(.semibold))
-                            Text("This image appears on your media detail page and mini player.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 8) {
+                            ProfileMediaEditorLabel(title: "Format", systemImage: "waveform")
+                            Menu {
+                                ForEach(capabilities.allowedFormats, id: \.self) { format in
+                                    Button {
+                                        workingDraft.format = format
+                                    } label: {
+                                        ProfileMediaEditorMenuOption(
+                                            title: formatLabel(for: format),
+                                            systemImage: format.iconName,
+                                            isSelected: workingDraft.format == format
+                                        )
+                                    }
+                                }
+                            } label: {
+                                ProfileMediaEditorControlSurface {
+                                    ProfileMediaEditorMenuLabel(
+                                        title: formatLabel(for: workingDraft.format),
+                                        icon: workingDraft.format.iconName
+                                    )
+                                }
+                            }
                         }
                     }
+                }
 
-                    PhotosPicker(selection: $coverArtPickerItem, matching: .images) {
-                        Label("Select Cover Art", systemImage: "photo")
-                    }
+                ProfileMediaEditorSection(
+                    title: "File",
+                    subtitle: "Attach the media you’re ready to share with followers.",
+                    icon: "paperclip"
+                ) {
+                    VStack(spacing: Theme.spacingMedium) {
+                        ProfileMediaEditorControlSurface {
+                            AttachmentPreview(draft: workingDraft)
+                        }
 
-                    if workingDraft.thumbnailData != nil || workingDraft.remoteThumbnailURL != nil {
-                        Button("Remove Cover Art", role: .destructive) {
-                            workingDraft.thumbnailData = nil
-                            workingDraft.thumbnailContentType = nil
-                            workingDraft.remoteThumbnailURL = nil
+                        if showMediaLibraryPicker {
+                            PhotosPicker(
+                                selection: $photoPickerItem,
+                                matching: mediaLibraryFilter
+                            ) {
+                                ProfileMediaEditorControlSurface(
+                                    background: Theme.highlightedCardBackground,
+                                    overlayColor: Theme.primaryColor.opacity(0.18)
+                                ) {
+                                    ProfileMediaEditorActionLabel(
+                                        icon: mediaPickerIcon,
+                                        title: mediaPickerTitle
+                                    )
+                                }
+                            }
+                        }
+
+                        if showAudioImporter {
+                            Button {
+                                isImportingFile = true
+                            } label: {
+                                ProfileMediaEditorControlSurface(
+                                    background: Theme.highlightedCardBackground,
+                                    overlayColor: Theme.primaryColor.opacity(0.18)
+                                ) {
+                                    ProfileMediaEditorActionLabel(
+                                        icon: "waveform.badge.plus",
+                                        title: "Import Audio or Document"
+                                    )
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        if uploadManager.activeUpload != nil && workingDraft.requiresAssetUpload {
+                            ProfileMediaEditorNote(
+                                text: "Finish the current upload before starting another."
+                            )
                         }
                     }
                 }
-            }
 
-            Section(header: Text("Collaborators")) {
-                if workingDraft.collaborators.isEmpty {
-                    Text("Tag collaborators to spotlight artists, engineers, or studios involved.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text("Assign each collaborator’s contribution so listeners know who did what.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    ForEach(workingDraft.collaborators) { collaborator in
-                        collaboratorRow(for: collaborator)
+                if workingDraft.format == .audio {
+                    ProfileMediaEditorSection(
+                        title: "Artwork",
+                        subtitle: "Cover art helps your audio stand out in the feed and mini player.",
+                        icon: "music.note"
+                    ) {
+                        VStack(spacing: Theme.spacingMedium) {
+                            ProfileMediaEditorControlSurface {
+                                HStack(alignment: .top, spacing: 12) {
+                                    coverArtPreview
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        Text("Display artwork")
+                                            .font(.subheadline.weight(.semibold))
+                                        Text("This image appears on your media detail page and mini player.")
+                                            .font(.footnote)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer(minLength: 0)
+                                }
+                            }
+
+                            PhotosPicker(selection: $coverArtPickerItem, matching: .images) {
+                                ProfileMediaEditorControlSurface(
+                                    background: Theme.highlightedCardBackground,
+                                    overlayColor: Theme.primaryColor.opacity(0.18)
+                                ) {
+                                    ProfileMediaEditorActionLabel(icon: "photo", title: "Select Cover Art")
+                                }
+                            }
+
+                            if workingDraft.thumbnailData != nil || workingDraft.remoteThumbnailURL != nil {
+                                Button(role: .destructive) {
+                                    workingDraft.thumbnailData = nil
+                                    workingDraft.thumbnailContentType = nil
+                                    workingDraft.remoteThumbnailURL = nil
+                                } label: {
+                                    ProfileMediaEditorControlSurface(
+                                        background: Color.red.opacity(0.12),
+                                        overlayColor: Color.red.opacity(0.2)
+                                    ) {
+                                        HStack(spacing: 12) {
+                                            Image(systemName: "trash")
+                                                .font(.system(size: 18, weight: .semibold))
+                                                .foregroundStyle(Color.red)
+                                            Text("Remove Cover Art")
+                                                .font(.callout.weight(.semibold))
+                                                .foregroundStyle(Color.red)
+                                            Spacer()
+                                        }
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
                     }
                 }
 
-                Button {
-                    isPresentingCollaboratorPicker = true
-                } label: {
-                    Label("Add collaborator", systemImage: "person.crop.circle.badge.plus")
+                ProfileMediaEditorSection(
+                    title: "Collaborators",
+                    subtitle: "Tag collaborators to spotlight who helped bring this piece to life.",
+                    icon: "person.2.fill"
+                ) {
+                    VStack(spacing: Theme.spacingMedium) {
+                        if workingDraft.collaborators.isEmpty {
+                            ProfileMediaEditorNote(
+                                text: "Tag collaborators to spotlight artists, engineers, or studios involved."
+                            )
+                        } else {
+                            ProfileMediaEditorNote(
+                                text: "Assign each collaborator’s contribution so listeners know who did what."
+                            )
+                            ForEach(workingDraft.collaborators) { collaborator in
+                                ProfileMediaEditorControlSurface {
+                                    collaboratorRow(for: collaborator)
+                                }
+                            }
+                        }
+
+                        Button {
+                            isPresentingCollaboratorPicker = true
+                        } label: {
+                            ProfileMediaEditorControlSurface(
+                                background: Theme.highlightedCardBackground,
+                                overlayColor: Theme.primaryColor.opacity(0.18)
+                            ) {
+                                ProfileMediaEditorActionLabel(icon: "person.crop.circle.badge.plus", title: "Add collaborator")
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
-            }
 
-            Section(header: Text("Visibility")) {
-                Text("Uploads automatically appear on your profile.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                ProfileMediaEditorSection(
+                    title: "Visibility",
+                    subtitle: "Control how this upload appears across Punch In.",
+                    icon: "sparkles"
+                ) {
+                    VStack(spacing: Theme.spacingMedium) {
+                        ProfileMediaEditorNote(
+                            text: "Uploads automatically appear on your profile."
+                        )
 
-                Toggle(isOn: $workingDraft.isPinned) {
-                    Label("Pin to profile", systemImage: "star.fill")
+                        ProfileMediaEditorControlSurface {
+                            Toggle(isOn: $workingDraft.isPinned) {
+                                Label("Pin to profile", systemImage: "star.fill")
+                                    .font(.callout.weight(.semibold))
+                            }
+                            .disabled(pinToggleDisabled)
+                            .tint(Theme.primaryColor)
+                        }
+
+                        if let reason = pinDisabledReason {
+                            ProfileMediaEditorNote(text: reason)
+                        }
+
+                        if workingDraft.format == .audio {
+                            ProfileMediaEditorControlSurface {
+                                Toggle(isOn: $workingDraft.isRadioEligible) {
+                                    Label("Feature on Local Artist Radio", systemImage: "dot.radiowaves.left.and.right")
+                                        .font(.callout.weight(.semibold))
+                                }
+                                .tint(Theme.primaryColor)
+                            }
+
+                            ProfileMediaEditorNote(
+                                text: "When enabled, this track can be surfaced in the in-app radio for listeners across Punch In."
+                            )
+
+                            Menu {
+                                Button {
+                                    workingDraft.primaryGenre = nil
+                                } label: {
+                                    ProfileMediaEditorMenuOption(
+                                        title: "Not set",
+                                        systemImage: nil,
+                                        isSelected: workingDraft.primaryGenre == nil
+                                    )
+                                }
+                                ForEach(MusicGenre.allCases) { genre in
+                                    Button {
+                                        workingDraft.primaryGenre = genre
+                                    } label: {
+                                        ProfileMediaEditorMenuOption(
+                                            title: genre.displayName,
+                                            systemImage: nil,
+                                            isSelected: workingDraft.primaryGenre == genre
+                                        )
+                                    }
+                                }
+                            } label: {
+                                ProfileMediaEditorControlSurface {
+                                    ProfileMediaEditorMenuLabel(
+                                        title: workingDraft.primaryGenre?.displayName ?? "Select genre",
+                                        icon: "music.quarternote.3",
+                                        isPlaceholder: workingDraft.primaryGenre == nil
+                                    )
+                                }
+                            }
+
+                            Menu {
+                                Button {
+                                    workingDraft.originState = nil
+                                } label: {
+                                    ProfileMediaEditorMenuOption(
+                                        title: "Nationwide",
+                                        systemImage: nil,
+                                        isSelected: workingDraft.originState == nil
+                                    )
+                                }
+                                ForEach(USState.allCases) { state in
+                                    Button {
+                                        workingDraft.originState = state
+                                    } label: {
+                                        ProfileMediaEditorMenuOption(
+                                            title: state.displayName,
+                                            systemImage: nil,
+                                            isSelected: workingDraft.originState == state
+                                        )
+                                    }
+                                }
+                            } label: {
+                                ProfileMediaEditorControlSurface {
+                                    ProfileMediaEditorMenuLabel(
+                                        title: workingDraft.originState?.displayName ?? "Nationwide",
+                                        icon: "mappin.and.ellipse"
+                                    )
+                                }
+                            }
+
+                            ProfileMediaEditorNote(
+                                text: "These fields help listeners discover tracks by genre and region inside Local Artist Radio."
+                            )
+                        }
+                    }
                 }
-                .disabled(pinToggleDisabled)
 
-                if let reason = pinDisabledReason {
-                    Text(reason)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                if let message = localErrorMessage {
+                    ProfileMediaEditorControlSurface(
+                        background: Color.red.opacity(0.12),
+                        overlayColor: Color.red.opacity(0.2)
+                    ) {
+                        HStack(alignment: .top, spacing: 12) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 18, weight: .semibold))
+                                .foregroundStyle(Color.red)
+                            Text(message)
+                                .font(.footnote.weight(.semibold))
+                                .foregroundStyle(Color.red)
+                            Spacer(minLength: 0)
+                        }
+                    }
                 }
-            }
 
-            if let message = localErrorMessage {
-                Section {
-                    Text(message)
-                        .font(.footnote)
-                        .foregroundStyle(Color.red)
-                }
-            }
-
-            if workingDraft.mediaItem != nil, let onDelete {
-                Section {
+                if workingDraft.mediaItem != nil, let onDelete {
                     Button(role: .destructive) {
-                        Task {
-                            await onDeleteCall(onDelete)
-                        }
+                        Task { await onDeleteCall(onDelete) }
                     } label: {
-                        Text("Delete media")
+                        ProfileMediaEditorControlSurface(
+                            background: Color.red.opacity(0.12),
+                            overlayColor: Color.red.opacity(0.2)
+                        ) {
+                            HStack(spacing: 12) {
+                                Image(systemName: "trash.fill")
+                                    .font(.system(size: 18, weight: .semibold))
+                                Text("Delete media")
+                                    .font(.callout.weight(.semibold))
+                                Spacer()
+                            }
+                            .foregroundStyle(Color.red)
+                        }
                     }
+                    .buttonStyle(.plain)
                 }
             }
+            .padding(.horizontal, Theme.spacingLarge)
+            .padding(.vertical, Theme.spacingLarge)
         }
+        .scrollIndicators(.hidden)
+        .background(Theme.appBackground.ignoresSafeArea())
         .navigationTitle(workingDraft.mediaItem == nil ? "Add media" : "Edit media")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -243,6 +483,24 @@ struct ProfileMediaEditorView: View {
                 )
             }
         }
+        .sheet(item: $pendingCoverArt) { pending in
+            ImageCropperView(
+                image: pending.image,
+                aspectRatio: 1,
+                onCancel: {
+                    pendingCoverArt = nil
+                },
+                onComplete: { cropped in
+                    pendingCoverArt = nil
+                    assignCroppedCoverArt(image: cropped)
+                }
+            )
+        }
+        .onChange(of: workingDraft.format) { newFormat in
+            if newFormat != .audio {
+                workingDraft.isRadioEligible = false
+            }
+        }
     }
 
     private var saveButtonTitle: String {
@@ -278,6 +536,51 @@ struct ProfileMediaEditorView: View {
         return types
     }
 
+    private var showMediaLibraryPicker: Bool {
+        workingDraft.format != .audio
+    }
+
+    private var showAudioImporter: Bool {
+        workingDraft.format == .audio
+    }
+
+    private var mediaLibraryFilter: PHPickerFilter {
+        switch workingDraft.format {
+        case .photo:
+            return .images
+        case .video:
+            return .videos
+        default:
+            return .any(of: [.images, .videos])
+        }
+    }
+
+    private var mediaPickerTitle: String {
+        switch workingDraft.format {
+        case .photo:
+            return "Select Photo"
+        case .video:
+            return "Select Video"
+        case .gallery:
+            return "Select Media"
+        default:
+            return "Select Photo or Video"
+        }
+    }
+
+    private var mediaPickerIcon: String {
+        switch workingDraft.format {
+        case .photo:
+            return "photo"
+        case .video:
+            return "play.rectangle"
+        case .gallery:
+            return "square.grid.2x2"
+        default:
+            return "photo.on.rectangle"
+        }
+    }
+
     private func formatLabel(for format: ProfileMediaFormat) -> String {
         switch format {
         case .audio:
@@ -288,6 +591,18 @@ struct ProfileMediaEditorView: View {
             return "Photo"
         case .gallery:
             return "Gallery"
+        }
+    }
+
+    private func categoryMenuButton(for category: ProfileMediaCategory) -> some View {
+        Button {
+            workingDraft.category = category
+        } label: {
+            ProfileMediaEditorMenuOption(
+                title: category.displayTitle,
+                systemImage: nil,
+                isSelected: workingDraft.category == category
+            )
         }
     }
 
@@ -490,12 +805,14 @@ struct ProfileMediaEditorView: View {
             var thumbnailContentType: String?
 
             if format == .video {
-                let thumbnail = try await generateThumbnail(for: url)
-                thumbnailData = thumbnail?.jpegData(compressionQuality: 0.7)
-                if let size = thumbnailData?.count {
-                    try validateFileSize(size)
+                if let thumbnail = try await generateThumbnail(for: url)?.squareArtwork(maxDimension: 800) {
+                    let data = thumbnail.jpegData(compressionQuality: 0.75)
+                    if let size = data?.count {
+                        try validateFileSize(size)
+                    }
+                    thumbnailData = data
+                    thumbnailContentType = data == nil ? nil : "image/jpeg"
                 }
-                thumbnailContentType = thumbnailData == nil ? nil : "image/jpeg"
             }
 
             workingDraft.assignAsset(
@@ -521,9 +838,8 @@ struct ProfileMediaEditorView: View {
             guard let data = try await item.loadTransferable(type: Data.self) else { return }
             try validateFileSize(data.count)
 
-            if let image = UIImage(data: data), let jpegData = image.jpegData(compressionQuality: 0.9) {
-                try validateFileSize(jpegData.count)
-                workingDraft.assignCoverArt(data: jpegData, contentType: "image/jpeg")
+            if let image = UIImage(data: data) {
+                pendingCoverArt = PendingCoverArt(image: image)
             } else {
                 workingDraft.assignCoverArt(data: data, contentType: "image/jpeg")
             }
@@ -572,6 +888,19 @@ struct ProfileMediaEditorView: View {
         }
     }
 
+    private func assignCroppedCoverArt(image: UIImage) {
+        let normalized = image.normalized()
+        let processed = normalized.resized(maxDimension: 800)
+        guard let data = processed.jpegData(compressionQuality: 0.85) else { return }
+
+        do {
+            try validateFileSize(data.count)
+            workingDraft.assignCoverArt(data: data, contentType: "image/jpeg")
+        } catch {
+            localErrorMessage = error.localizedDescription
+        }
+    }
+
     private func validateFileSize(_ bytes: Int) throws {
         if bytes > maxFileSizeBytes {
             throw MediaLibraryError.fileTooLarge(maxBytes: maxFileSizeBytes)
@@ -610,6 +939,219 @@ struct ProfileMediaEditorView: View {
             }
         }
     }
+}
+
+private struct ProfileMediaEditorSection<Content: View>: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let title: String
+    let subtitle: String?
+    let icon: String
+    let content: Content
+
+    init(title: String, subtitle: String? = nil, icon: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.subtitle = subtitle
+        self.icon = icon
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.spacingMedium) {
+            HStack(spacing: Theme.spacingMedium) {
+                ZStack {
+                    Circle()
+                        .fill(Theme.primaryColor.opacity(colorScheme == .dark ? 0.3 : 0.18))
+                        .frame(width: 44, height: 44)
+                    Image(systemName: icon)
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(Theme.primaryColor)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .font(.headline.weight(.semibold))
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+            }
+            content
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(Theme.spacingMedium)
+        .background(
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .fill(Theme.cardBackground)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 28, style: .continuous)
+                        .stroke(borderColor, lineWidth: 1)
+                )
+        )
+        .shadow(color: shadowColor, radius: 14, y: 6)
+    }
+
+    private var borderColor: Color {
+        colorScheme == .dark ? Color.white.opacity(0.05) : Color.black.opacity(0.05)
+    }
+
+    private var shadowColor: Color {
+        colorScheme == .dark ? Color.black.opacity(0.45) : Color.black.opacity(0.06)
+    }
+}
+
+private struct ProfileMediaEditorLabel: View {
+    let title: String
+    let systemImage: String?
+
+    var body: some View {
+        HStack(spacing: 6) {
+            if let systemImage {
+                Image(systemName: systemImage)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            Text(title.uppercased())
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .tracking(0.7)
+        }
+    }
+}
+
+private struct ProfileMediaEditorControlSurface<Content: View>: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let background: Color
+    let overlayColor: Color?
+    let content: Content
+
+    init(background: Color = Theme.elevatedCardBackground, overlayColor: Color? = nil, @ViewBuilder content: () -> Content) {
+        self.background = background
+        self.overlayColor = overlayColor
+        self.content = content()
+    }
+
+    var body: some View {
+        content
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+            .background(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(background)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .stroke(resolvedOverlayColor, lineWidth: 1)
+                    )
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+    }
+
+    private var resolvedOverlayColor: Color {
+        if let overlayColor {
+            return overlayColor
+        }
+        return colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.05)
+    }
+}
+
+private struct ProfileMediaEditorMenuLabel: View {
+    let title: String
+    let icon: String?
+    var isPlaceholder: Bool
+
+    init(title: String, icon: String? = nil, isPlaceholder: Bool = false) {
+        self.title = title
+        self.icon = icon
+        self.isPlaceholder = isPlaceholder
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            if let icon {
+                Image(systemName: icon)
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            Text(title)
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(isPlaceholder ? .secondary : Color.primary)
+            Spacer()
+            Image(systemName: "chevron.up.chevron.down")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct ProfileMediaEditorMenuOption: View {
+    let title: String
+    let systemImage: String?
+    let isSelected: Bool
+
+    var body: some View {
+        HStack {
+            if let systemImage {
+                Image(systemName: systemImage)
+            }
+            Text(title)
+            Spacer()
+            if isSelected {
+                Image(systemName: "checkmark")
+                    .foregroundStyle(Theme.primaryColor)
+            }
+        }
+        .font(.callout)
+    }
+}
+
+private struct ProfileMediaEditorActionLabel: View {
+    let icon: String
+    let title: String
+    var tint: Color
+
+    init(icon: String, title: String, tint: Color = Theme.primaryColor) {
+        self.icon = icon
+        self.title = title
+        self.tint = tint
+    }
+
+    var body: some View {
+        HStack(spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(tint.opacity(0.18))
+                    .frame(width: 44, height: 44)
+                Image(systemName: icon)
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(tint)
+            }
+            Text(title)
+                .font(.callout.weight(.semibold))
+            Spacer()
+            Image(systemName: "chevron.right")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct ProfileMediaEditorNote: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .lineSpacing(1.5)
+    }
+}
+
+private struct PendingCoverArt: Identifiable {
+    let id = UUID()
+    let image: UIImage
 }
 
 private struct AttachmentPreview: View {

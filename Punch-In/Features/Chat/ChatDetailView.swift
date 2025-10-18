@@ -1,14 +1,41 @@
 import SwiftUI
 import PhotosUI
 import UIKit
+import UniformTypeIdentifiers
+import AVKit
+import AVFoundation
 
 @MainActor
 struct ChatDetailView: View {
+    private enum ProjectTab: String, CaseIterable, Identifiable {
+        case messages
+        case files
+        case tasks
+        case drive
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .messages: return "Chat"
+            case .files: return "Files"
+            case .tasks: return "To-Do"
+            case .drive: return "Drive"
+            }
+        }
+    }
+
     @StateObject private var viewModel: ChatDetailViewModel
     @State private var selectedPhotoItem: PhotosPickerItem?
     @State private var isShowingGroupSettings = false
     @State private var selectedParticipant: ChatParticipant?
     @State private var presentedError: String?
+    @State private var selectedProjectTab: ProjectTab = .messages
+    @State private var newTaskTitle: String = ""
+    @State private var isPresentingFileImporter = false
+    @State private var presentedMedia: ProjectMediaPresentation?
+    @FocusState private var isTaskFieldFocused: Bool
+    @Environment(\.openURL) private var openURL
 
     init(viewModel: ChatDetailViewModel) {
         _viewModel = StateObject(wrappedValue: viewModel)
@@ -16,26 +43,32 @@ struct ChatDetailView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            MessageListView(
-                messages: viewModel.sortedMessages,
-                currentUserId: viewModel.currentUserParticipant?.id,
-                onParticipantSelected: { participant in
-                    selectedParticipant = participant
+            if viewModel.thread.isProject {
+                Picker("Workspace section", selection: $selectedProjectTab) {
+                    ForEach(ProjectTab.allCases) { tab in
+                        Text(tab.label).tag(tab)
+                    }
                 }
-            )
+                .pickerStyle(.segmented)
+                .padding(.horizontal, Theme.spacingMedium)
+                .padding(.top, Theme.spacingMedium)
+                .padding(.bottom, Theme.spacingSmall)
+                .background(Theme.appBackground)
+            }
 
-            Divider()
-
-            ComposerBar(
-                draft: $viewModel.draftMessage,
-                isSending: viewModel.isSendingMessage,
-                sendAction: {
-                    Task { await viewModel.sendTextMessage() }
-                },
-                photoPickerItem: $selectedPhotoItem
-            )
-            .padding(.horizontal, Theme.spacingMedium)
-            .padding(.vertical, Theme.spacingSmall)
+            Group {
+                if !viewModel.thread.isProject || selectedProjectTab == .messages {
+                    conversationContent
+                } else if selectedProjectTab == .files {
+                    filesContent
+                } else if selectedProjectTab == .tasks {
+                    tasksContent
+                } else {
+                    driveContent
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .background(Theme.appBackground)
         }
         .navigationTitle(viewModel.thread.displayName(currentUserId: viewModel.currentUserParticipant?.id))
         .navigationBarTitleDisplayMode(.inline)
@@ -72,6 +105,9 @@ struct ChatDetailView: View {
                 ParticipantDetailContainer(participant: participant)
             }
         }
+        .sheet(item: $presentedMedia) { media in
+            ProjectMediaPlayerSheet(media: media)
+        }
         .onChange(of: selectedPhotoItem) { _, newValue in
             guard let newValue else { return }
             Task { await loadPhoto(from: newValue) }
@@ -79,6 +115,11 @@ struct ChatDetailView: View {
         .onChange(of: viewModel.errorMessage) { _, newValue in
             guard let newValue else { return }
             presentedError = newValue
+        }
+        .onChange(of: viewModel.thread.isProject) { _, isProject in
+            if !isProject {
+                selectedProjectTab = .messages
+            }
         }
         .alert(presentedError ?? "", isPresented: Binding(
             get: { presentedError != nil },
@@ -88,6 +129,19 @@ struct ChatDetailView: View {
         })
         .task {
             await viewModel.refreshThread()
+        }
+        .fileImporter(
+            isPresented: $isPresentingFileImporter,
+            allowedContentTypes: [.data, .content, .item],
+            allowsMultipleSelection: false
+        ) { result in
+            switch result {
+            case let .success(urls):
+                guard let url = urls.first else { return }
+                Task { await handleFileImport(url) }
+            case let .failure(error):
+                presentedError = error.localizedDescription
+            }
         }
     }
 
@@ -104,6 +158,464 @@ struct ChatDetailView: View {
         }
     }
 
+    @MainActor
+    private func handleFileImport(_ url: URL) async {
+        let accessGranted = url.startAccessingSecurityScopedResource()
+        defer {
+            if accessGranted {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        do {
+            let resourceValues = try url.resourceValues(forKeys: [.fileSizeKey])
+            if let size = resourceValues.fileSize, size > 200 * 1024 * 1024 {
+                presentedError = "Files must be 200 MB or smaller."
+                return
+            }
+
+            let data = try await Task.detached(priority: .userInitiated) {
+                try Data(contentsOf: url)
+            }.value
+            let mimeType = MimeType.fromFileExtension(url.pathExtension)
+            await viewModel.uploadProjectFile(
+                data: data,
+                fileName: url.lastPathComponent,
+                contentType: mimeType
+            )
+        } catch {
+            presentedError = error.localizedDescription
+        }
+    }
+
+    @ViewBuilder
+    private var conversationContent: some View {
+        VStack(spacing: 0) {
+            MessageListView(
+                messages: viewModel.sortedMessages,
+                currentUserId: viewModel.currentUserParticipant?.id,
+                onParticipantSelected: { participant in
+                    selectedParticipant = participant
+                }
+            )
+
+            Divider()
+
+            ComposerBar(
+                draft: $viewModel.draftMessage,
+                isSending: viewModel.isSendingMessage,
+                sendAction: {
+                    Task { await viewModel.sendTextMessage() }
+                },
+                photoPickerItem: $selectedPhotoItem
+            )
+            .padding(.horizontal, Theme.spacingMedium)
+            .padding(.vertical, Theme.spacingSmall)
+        }
+    }
+
+    @ViewBuilder
+    private var filesContent: some View {
+        let files = viewModel.project?.files ?? []
+        let isOwner = viewModel.thread.creatorId == viewModel.currentUserParticipant?.id
+        let allowsDownloads = viewModel.project?.allowsDownloads ?? true
+        List {
+            if isOwner {
+                Section("Access") {
+                    Toggle("Allow teammates to download files", isOn: Binding(
+                        get: { viewModel.project?.allowsDownloads ?? true },
+                        set: { newValue in
+                            Task { await viewModel.updateDownloadPermission(allowsDownloads: newValue) }
+                        }
+                    ))
+                    .disabled(viewModel.isUpdatingProject)
+
+                    Text("When disabled, teammates can see file details but cannot open or export them.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } else if !allowsDownloads {
+                Section {
+                    Text("File downloads are currently disabled by the project owner.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if let summary = viewModel.project?.summary, !summary.isEmpty {
+                Section("Summary") {
+                    Text(summary)
+                        .font(.body)
+                        .foregroundStyle(.primary)
+                        .padding(.vertical, 4)
+                }
+            }
+
+            Section("Files") {
+                if files.isEmpty {
+                    Text("No files have been shared yet.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, Theme.spacingSmall)
+                } else {
+                    ForEach(files) { file in
+                        let canDownload = allowsDownloads || isOwner
+                        Button {
+                            Task {
+                                let url = await viewModel.downloadURL(for: file)
+                                await MainActor.run {
+                                    if let url {
+                                        if let kind = mediaKind(for: file) {
+                                            presentedMedia = ProjectMediaPresentation(file: file, url: url, kind: kind)
+                                        } else {
+                                            openURL(url)
+                                        }
+                                    }
+                                }
+                            }
+                        } label: {
+                            ProjectFileRow(
+                                file: file,
+                                kind: mediaKind(for: file),
+                                isLoading: viewModel.downloadInProgressFileId == file.id,
+                                disabled: !canDownload
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!canDownload)
+                        .swipeActions {
+                            if isOwner {
+                                Button(role: .destructive) {
+                                    Task { await viewModel.removeFile(file) }
+                                } label: {
+                                    Label("Remove", systemImage: "trash")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Section {
+                Button {
+                    isPresentingFileImporter = true
+                } label: {
+                    Label("Upload file", systemImage: "plus")
+                }
+                .disabled(viewModel.isUpdatingProject)
+
+                Text("Files are stored securely in Punch-In and available to project members only.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let progress = viewModel.uploadProgress {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ProgressView(value: progress)
+                            .progressViewStyle(.linear)
+                        Text("Uploading… \(percentString(for: progress))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.top, 6)
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .overlay {
+            if viewModel.isUpdatingProject {
+                ProgressView()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var tasksContent: some View {
+        let tasks = viewModel.project?.tasks ?? []
+        List {
+            if let summary = viewModel.project?.summary, !summary.isEmpty {
+                Section("Summary") {
+                    Text(summary)
+                        .font(.body)
+                        .foregroundStyle(.primary)
+                        .padding(.vertical, 4)
+                }
+            }
+
+            Section("To-Do List") {
+                if tasks.isEmpty {
+                    Text("No to-do items yet. Add a task to keep the team aligned.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, Theme.spacingSmall)
+                } else {
+                    ForEach(tasks) { task in
+                        ProjectTaskRow(task: task) {
+                            Task { await viewModel.toggleTaskCompletion(task) }
+                        }
+                        .swipeActions {
+                            Button(role: .destructive) {
+                                Task { await viewModel.removeTask(task) }
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        }
+                    }
+                }
+            }
+
+            Section("Add Task") {
+                HStack(spacing: Theme.spacingSmall) {
+                    TextField("Add a to-do", text: $newTaskTitle)
+                        .textInputAutocapitalization(.sentences)
+                        .focused($isTaskFieldFocused)
+                    Button {
+                        let title = newTaskTitle
+                        newTaskTitle = ""
+                        isTaskFieldFocused = false
+                        Task { await viewModel.addTask(title: title) }
+                    } label: {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.system(size: 20, weight: .semibold))
+                            .foregroundStyle(Theme.primaryColor)
+                    }
+                    .disabled(newTaskTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || viewModel.isUpdatingProject)
+                }
+                .padding(.vertical, 4)
+            }
+        }
+        .listStyle(.insetGrouped)
+        .overlay {
+            if viewModel.isUpdatingProject {
+                ProgressView()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var driveContent: some View {
+        VStack(spacing: 20) {
+            Image(systemName: "externaldrive.fill.badge.person.crop")
+                .font(.system(size: 48))
+                .foregroundStyle(Theme.primaryColor)
+
+            VStack(spacing: 8) {
+                Text("Project storage is powered by Punch-In.")
+                    .font(.headline)
+
+                Text("Only members of this conversation can upload or download files. Access is enforced through Firestore and Storage security rules.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                Text("Plan: \(viewModel.workspaceDrivePlan.displayName)")
+                    .font(.subheadline.weight(.semibold))
+                Text(viewModel.storagePlanDescription)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                if viewModel.hasProjectStorage == false {
+                    Text(viewModel.storageUpgradeMessage)
+                        .font(.footnote)
+                        .foregroundStyle(Theme.primaryColor)
+                        .multilineTextAlignment(.center)
+                }
+            }
+
+            if viewModel.hasProjectStorage, let limitText = viewModel.formattedProjectStorageLimit {
+                VStack(spacing: 12) {
+                    ProgressView(value: min(max(viewModel.projectStorageFractionUsed, 0), 1))
+                        .progressViewStyle(.linear)
+                    let usedText = formattedByteCount(viewModel.totalProjectFileSize)
+                    let remainingText = formattedByteCount(viewModel.remainingProjectStorage)
+                    let percent = Int(min(max(viewModel.projectStorageFractionUsed, 0), 1) * 100)
+                    Text("Storage used: \(usedText) of \(limitText) (\(percent)%)")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Text("Remaining: \(remainingText)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal)
+
+                VStack(spacing: 6) {
+                    Text("Files: \(viewModel.project?.files.count ?? 0)")
+                        .font(.body.weight(.semibold))
+                    if viewModel.totalProjectFileSize > 0 {
+                        Text("Total size: \(formattedByteCount(viewModel.totalProjectFileSize))")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Text("Add files from the Files tab to keep project assets in one shared space.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+            } else {
+                Text("Subscribe to Punch-In to start uploading shared assets to this workspace.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
+        .background(Theme.appBackground)
+    }
+
+    private struct ProjectMediaPresentation: Identifiable {
+        enum Kind {
+            case audio
+            case video
+        }
+
+        let file: ChatThread.Project.FileReference
+        let url: URL
+        let kind: Kind
+
+        var id: String { file.id }
+    }
+
+    private struct ProjectMediaPlayerSheet: View {
+        let media: ProjectMediaPresentation
+        @Environment(\.dismiss) private var dismiss
+        @State private var player: AVPlayer
+
+        init(media: ProjectMediaPresentation) {
+            self.media = media
+            _player = State(initialValue: AVPlayer(url: media.url))
+        }
+
+        var body: some View {
+            NavigationStack {
+                PlayerViewController(player: player)
+                    .ignoresSafeArea()
+                    .navigationTitle(media.file.name)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Done") {
+                                player.pause()
+                                dismiss()
+                            }
+                        }
+                    }
+            }
+            .onAppear {
+                player.play()
+            }
+            .onDisappear {
+                player.pause()
+            }
+        }
+    }
+
+    private struct PlayerViewController: UIViewControllerRepresentable {
+        let player: AVPlayer
+
+        func makeUIViewController(context: Context) -> AVPlayerViewController {
+            let controller = AVPlayerViewController()
+            controller.player = player
+            controller.modalPresentationStyle = .automatic
+            controller.showsPlaybackControls = true
+            return controller
+        }
+
+        func updateUIViewController(_ uiViewController: AVPlayerViewController, context: Context) {
+            uiViewController.player = player
+        }
+    }
+
+    private struct ProjectFileRow: View {
+        let file: ChatThread.Project.FileReference
+        let kind: ProjectMediaPresentation.Kind?
+        let isLoading: Bool
+        let disabled: Bool
+
+        var body: some View {
+            HStack(alignment: .center, spacing: Theme.spacingMedium) {
+                Image(systemName: iconName)
+                    .font(.system(size: 24))
+                    .foregroundStyle(Theme.primaryColor)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(file.name)
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+
+                    if let details = metadataDescription {
+                        Text(details)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Text("Uploaded by \(file.uploadedBy.displayName) • \(file.uploadedAt, style: .relative)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                if isLoading {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                } else {
+                    if disabled {
+                        Image(systemName: "lock.fill")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Image(systemName: "arrow.up.right.square")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .padding(.vertical, 6)
+        }
+
+        private var iconName: String {
+            switch kind {
+            case .some(.audio): return "music.note.waveform"
+            case .some(.video): return "film"
+            case .none: return "doc.fill"
+            }
+        }
+
+        private var metadataDescription: String? {
+            if disabled {
+                return "Downloads disabled"
+            } else if let size = file.fileSize {
+                let formatted = ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file)
+                return "\(formatted) • tap to open"
+            }
+            return "Tap to open"
+        }
+    }
+
+    private struct ProjectTaskRow: View {
+        let task: ChatThread.Project.Task
+        let toggle: () -> Void
+
+        var body: some View {
+            Button(action: toggle) {
+                HStack(spacing: Theme.spacingSmall) {
+                    Image(systemName: task.isComplete ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(task.isComplete ? Theme.primaryColor : Color.secondary)
+                        .font(.system(size: 20, weight: .semibold))
+
+                    Text(task.title)
+                        .font(.body)
+                        .foregroundStyle(task.isComplete ? .secondary : .primary)
+                        .strikethrough(task.isComplete)
+
+                    Spacer()
+                }
+            }
+            .buttonStyle(.plain)
+            .padding(.vertical, 6)
+        }
+    }
+
     private var otherParticipants: [ChatParticipant] {
         let currentId = viewModel.currentUserParticipant?.id
         return viewModel.thread.participants.filter { participant in
@@ -111,6 +623,31 @@ struct ChatDetailView: View {
             return participant.id != currentId
         }
     }
+
+    private func percentString(for progress: Double) -> String {
+        let clamped = min(max(progress, 0), 1)
+        return "\(Int(clamped * 100))%"
+    }
+
+    private func mediaKind(for file: ChatThread.Project.FileReference) -> ProjectMediaPresentation.Kind? {
+        if let contentType = file.contentType?.lowercased() {
+            if contentType.contains("audio") { return .audio }
+            if contentType.contains("video") { return .video }
+        }
+
+        let ext = file.name.split(separator: ".").last?.lowercased() ?? ""
+        let audioExtensions = ["mp3", "wav", "m4a", "aac", "aiff", "flac", "ogg"]
+        let videoExtensions = ["mp4", "mov", "m4v", "avi", "mpg", "mpeg", "hevc", "wmv"]
+
+        if audioExtensions.contains(ext) { return .audio }
+        if videoExtensions.contains(ext) { return .video }
+        return nil
+    }
+
+    private func formattedByteCount(_ bytes: Int) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+    }
+
 }
 
 private struct MessageListView: View {
@@ -700,16 +1237,23 @@ private struct ChatStudioDetailHost: View {
 }
 
 #Preview("Chat Detail") {
-    let appState = AppState()
-    appState.currentUser = .mock
-    let thread = ChatThread.mockList.first!
-    return NavigationStack {
-        ChatDetailView(
-            viewModel: ChatDetailViewModel(
-                thread: thread,
-                chatService: MockChatService(),
-                appState: appState
+    ChatDetailPreviewFactory.make()
+}
+
+private enum ChatDetailPreviewFactory {
+    static func make() -> some View {
+        let appState = AppState()
+        appState.currentUser = .mock
+        let thread = ChatThread.mockList.first!
+        return NavigationStack {
+            ChatDetailView(
+                viewModel: ChatDetailViewModel(
+                    thread: thread,
+                    chatService: MockChatService(),
+                    storageService: MockStorageService(),
+                    appState: appState
+                )
             )
-        )
+        }
     }
 }

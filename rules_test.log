@@ -1,0 +1,26 @@
+Command line invocation:
+    /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -scheme storage-rules-test test
+
+Resolve Package Graph
+
+
+Resolved source packages:
+  nanopb: https://github.com/firebase/nanopb.git @ 2.30910.0
+  GoogleUtilities: https://github.com/google/GoogleUtilities.git @ 7.13.3
+  leveldb: https://github.com/firebase/leveldb.git @ 1.22.5
+  InteropForGoogle: https://github.com/google/interop-ios-for-google-sdks.git @ 100.0.0
+  AppAuth: https://github.com/openid/AppAuth-iOS.git @ 1.7.6
+  Firebase: https://github.com/firebase/firebase-ios-sdk.git @ 10.29.0
+  GTMSessionFetcher: https://github.com/google/gtm-session-fetcher.git @ 3.5.0
+  gRPC: https://github.com/google/grpc-binary.git @ 1.62.2
+  GoogleAppMeasurement: https://github.com/google/GoogleAppMeasurement.git @ 10.28.0
+  GoogleDataTransport: https://github.com/google/GoogleDataTransport.git @ 9.4.0
+  Promises: https://github.com/google/promises.git @ 2.4.0
+  GoogleSignIn: https://github.com/google/GoogleSignIn-iOS.git @ 7.1.0
+  GTMAppAuth: https://github.com/google/GTMAppAuth.git @ 4.1.1
+  SwiftProtobuf: https://github.com/apple/swift-protobuf.git @ 1.31.1
+  AppCheck: https://github.com/google/app-check.git @ 10.19.2
+  abseil: https://github.com/google/abseil-cpp-binary.git @ 1.2024011602.0
+
+2025-10-16 21:00:17.264 xcodebuild[10322:2662058] Writing error result bundle to /var/folders/n8/wpd856k50kb944j9lwb2kbn00000gn/T/ResultBundle_2025-16-10_21-00-0017.xcresult
+xcodebuild: error: The project named "Punch-In" does not contain a scheme named "storage-rules-test". The "-list" option can be used to find the names of the schemes in the project.

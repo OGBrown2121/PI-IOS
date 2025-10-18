@@ -11,6 +11,7 @@ protocol StorageService {
         progress: (@Sendable (Double) -> Void)?
     ) async throws -> URL
     func deleteFile(at path: String) async throws
+    func downloadURL(for path: String) async throws -> URL
 }
 
 struct FirebaseStorageService: StorageService {
@@ -101,6 +102,25 @@ struct FirebaseStorageService: StorageService {
             }
         }
     }
+
+    func downloadURL(for path: String) async throws -> URL {
+        let reference = storage.reference(withPath: path)
+        return try await withCheckedThrowingContinuation { continuation in
+            reference.downloadURL { url, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else if let url {
+                    continuation.resume(returning: url)
+                } else {
+                    continuation.resume(throwing: NSError(
+                        domain: "StorageService",
+                        code: -3,
+                        userInfo: [NSLocalizedDescriptionKey: "Failed to produce download URL"]
+                    ))
+                }
+            }
+        }
+    }
 }
 
 struct MockStorageService: StorageService {
@@ -119,6 +139,10 @@ struct MockStorageService: StorageService {
     }
 
     func deleteFile(at path: String) async throws {}
+
+    func downloadURL(for path: String) async throws -> URL {
+        URL(string: "https://example.com/mock-storage/\(path)")!
+    }
 }
 
 extension StorageService {

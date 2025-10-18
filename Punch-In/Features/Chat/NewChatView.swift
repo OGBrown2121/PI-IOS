@@ -50,11 +50,42 @@ struct NewChatView: View {
                 }
             }
 
+            Section(header: Text("Workspace type")) {
+                Toggle("Create a project workspace", isOn: $viewModel.newChatIsProject)
+                    .toggleStyle(.switch)
+                if viewModel.isCreatingProject {
+                    Text("Project chats surface Files, To-Do, and Drive tabs for the team.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, Theme.spacingSmall)
+                }
+            }
+
+            if viewModel.isCreatingProject {
+                Section(header: Text("Project details"), footer: Text("Add an optional summary or shared drive link to keep everyone on the same page.")) {
+                    TextField("Project title", text: $viewModel.newProjectTitle)
+                        .textInputAutocapitalization(.words)
+                    TextField(
+                        "Summary (optional)",
+                        text: $viewModel.newProjectSummary,
+                        axis: .vertical
+                    )
+                    .lineLimit(1...3)
+                    TextField("Shared drive link (optional)", text: $viewModel.newProjectDriveLink)
+                        .keyboardType(.URL)
+                        .textContentType(.URL)
+                        .autocapitalization(.none)
+                }
+            }
+
             let groupPhoto = viewModel.newChatGroupPhoto
             let groupName = viewModel.newChatGroupName
             if viewModel.isNewChatGroup {
                 Section(header: Text("Group settings"), footer: Text("As the creator you can decide whether other participants may change these details later.")) {
-                    TextField("Group name", text: $viewModel.newChatGroupName)
+                    TextField(
+                        viewModel.isCreatingProject ? "Workspace name (optional)" : "Group name",
+                        text: $viewModel.newChatGroupName
+                    )
                         .textInputAutocapitalization(.words)
                     PhotosPicker(selection: $groupPhotoPickerItem, matching: .images) {
                         HStack {
@@ -89,6 +120,8 @@ struct NewChatView: View {
                 }
             }
             ToolbarItem(placement: .confirmationAction) {
+                let isCreating = viewModel.isCreatingThread
+                let missingProjectTitle = viewModel.isCreatingProject && viewModel.newProjectTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 Button {
                     Task { @MainActor in
                         if let thread = await viewModel.createThread() {
@@ -97,7 +130,6 @@ struct NewChatView: View {
                         }
                     }
                 } label: {
-                    let isCreating = viewModel.isCreatingThread
                     if isCreating {
                         ProgressView()
                     } else {
@@ -106,12 +138,19 @@ struct NewChatView: View {
                             .fontWeight(.semibold)
                     }
                 }
-                .disabled(viewModel.selectedParticipants.isEmpty || viewModel.isCreatingThread)
+                .disabled(viewModel.selectedParticipants.isEmpty || isCreating || missingProjectTitle)
             }
         }
         .onChange(of: groupPhotoPickerItem) { _, newValue in
             guard let newValue else { return }
             Task { await loadGroupPhoto(from: newValue) }
+        }
+        .onChange(of: viewModel.newChatIsProject) { _, isProject in
+            if !isProject {
+                viewModel.newProjectTitle = ""
+                viewModel.newProjectSummary = ""
+                viewModel.newProjectDriveLink = ""
+            }
         }
     }
 

@@ -93,5 +93,43 @@ const { readFileSync } = require('fs');
     console.error('Non-owner media upload unexpectedly succeeded', err);
   }
 
+  const reportId = 'report-123';
+  const evidencePath = `user-reports/${ownerId}/${reportId}/evidence/photo.jpg`;
+  try {
+    await assertSucceeds(
+      ownerStorage.ref(evidencePath).putString('evidence-bytes', 'raw', {
+        contentType: 'image/jpeg'
+      })
+    );
+    console.log('Reporter evidence upload succeeded as expected');
+  } catch (err) {
+    console.error('Reporter evidence upload failed unexpectedly', err);
+  }
+
+  try {
+    await assertFails(
+      otherStorage.ref(evidencePath).putString('evidence-bytes', 'raw', {
+        contentType: 'image/jpeg'
+      })
+    );
+    console.log('Non-reporter evidence upload denied as expected');
+  } catch (err) {
+    console.error('Non-reporter evidence upload unexpectedly succeeded', err);
+  }
+
+  try {
+    await assertFails(otherStorage.ref(evidencePath).delete());
+    console.log('Non-reporter evidence delete denied as expected');
+  } catch (err) {
+    console.error('Non-reporter evidence delete unexpectedly succeeded', err);
+  }
+
+  try {
+    await assertSucceeds(ownerStorage.ref(evidencePath).delete());
+    console.log('Reporter evidence delete succeeded as expected');
+  } catch (err) {
+    console.error('Reporter evidence delete failed unexpectedly', err);
+  }
+
   await env.cleanup();
 })();

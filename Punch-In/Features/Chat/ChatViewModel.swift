@@ -13,6 +13,10 @@ final class ChatViewModel: ObservableObject {
     @Published var newChatGroupName: String = ""
     @Published var newChatGroupPhoto: ChatMedia?
     @Published var newChatAllowsParticipantEditing = true
+    @Published var newChatIsProject = false
+    @Published var newProjectTitle: String = ""
+    @Published var newProjectSummary: String = ""
+    @Published var newProjectDriveLink: String = ""
     @Published private(set) var isCreatingThread = false
 
     // Participant search
@@ -45,8 +49,10 @@ final class ChatViewModel: ObservableObject {
     }
 
     var isNewChatGroup: Bool {
-        selectedParticipants.count > 1
+        newChatIsProject || selectedParticipants.count > 1
     }
+
+    var isCreatingProject: Bool { newChatIsProject }
 
     func refresh() async {
         isLoading = true
@@ -74,6 +80,10 @@ final class ChatViewModel: ObservableObject {
         newChatGroupName = ""
         newChatGroupPhoto = nil
         newChatAllowsParticipantEditing = true
+        newChatIsProject = false
+        newProjectTitle = ""
+        newProjectSummary = ""
+        newProjectDriveLink = ""
         updateParticipantQuery("")
     }
 
@@ -85,6 +95,10 @@ final class ChatViewModel: ObservableObject {
         newChatGroupName = ""
         newChatGroupPhoto = nil
         newChatAllowsParticipantEditing = true
+        newChatIsProject = false
+        newProjectTitle = ""
+        newProjectSummary = ""
+        newProjectDriveLink = ""
     }
 
     func updateParticipantQuery(_ query: String) {
@@ -125,22 +139,87 @@ final class ChatViewModel: ObservableObject {
         errorMessage = nil
 
         do {
-            let kind: ChatThread.Kind = isNewChatGroup ? .group : .direct
+            let kind: ChatThread.Kind
+            if newChatIsProject {
+                kind = .project
+            } else if selectedParticipants.count > 1 {
+                kind = .group
+            } else {
+                kind = .direct
+            }
+
             var settings: ChatThread.GroupSettings?
-            if kind == .group {
-                let name = newChatGroupName.trimmingCharacters(in: .whitespacesAndNewlines)
+            if kind != .direct {
+                let trimmedGroupName = newChatGroupName.trimmingCharacters(in: .whitespacesAndNewlines)
+                let defaultName = defaultGroupName()
+                let resolvedName: String
+                if kind == .project {
+                    let trimmedProjectTitle = newProjectTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmedProjectTitle.isEmpty {
+                        resolvedName = trimmedProjectTitle
+                    } else if !trimmedGroupName.isEmpty {
+                        resolvedName = trimmedGroupName
+                    } else {
+                        resolvedName = defaultName
+                    }
+                } else {
+                    resolvedName = trimmedGroupName.isEmpty ? defaultName : trimmedGroupName
+                }
+
                 settings = ChatThread.GroupSettings(
-                    name: name.isEmpty ? defaultGroupName() : name,
+                    name: resolvedName,
                     photo: newChatGroupPhoto,
                     allowsParticipantEditing: newChatAllowsParticipantEditing
                 )
+            }
+
+            var project: ChatThread.Project?
+            if kind == .project {
+                let trimmedTitle = newProjectTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmedTitle.isEmpty else {
+                    errorMessage = "Add a title to your project."
+                    isCreatingThread = false
+                    return nil
+                }
+                let trimmedSummary = newProjectSummary.trimmingCharacters(in: .whitespacesAndNewlines)
+                let trimmedDrive = newProjectDriveLink.trimmingCharacters(in: .whitespacesAndNewlines)
+                var driveURL: URL?
+                if !trimmedDrive.isEmpty {
+                    let normalizedDrive: String
+                    if trimmedDrive.contains("://") {
+                        normalizedDrive = trimmedDrive
+                    } else {
+                        normalizedDrive = "https://\(trimmedDrive)"
+                    }
+                    guard let parsed = URL(string: normalizedDrive) else {
+                        errorMessage = "Enter a valid link for the shared drive."
+                        isCreatingThread = false
+                        return nil
+                    }
+                    driveURL = parsed
+                }
+                project = ChatThread.Project(
+                    title: trimmedTitle,
+                    summary: trimmedSummary.isEmpty ? nil : trimmedSummary,
+                    tasks: [],
+                    files: [],
+                    sharedDriveURL: driveURL
+                )
+                if settings == nil {
+                    settings = ChatThread.GroupSettings(
+                        name: trimmedTitle,
+                        photo: newChatGroupPhoto,
+                        allowsParticipantEditing: newChatAllowsParticipantEditing
+                    )
+                }
             }
 
             let thread = try await chatService.createThread(
                 creator: creator,
                 participants: selectedParticipants,
                 kind: kind,
-                groupSettings: settings
+                groupSettings: settings,
+                project: project
             )
 
             threads.insert(thread, at: 0)

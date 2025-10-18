@@ -3,6 +3,7 @@ import SwiftUI
 struct ArtistDetailView: View {
     @Environment(\.di) private var di
     @EnvironmentObject private var appState: AppState
+    @Environment(\.openURL) private var openURL
 
     let artistId: String
     private let heroStyle: HeroStyle
@@ -20,6 +21,21 @@ struct ArtistDetailView: View {
     @State private var mediaItems: [ProfileMediaItem] = []
     @State private var isLoadingMediaLibrary = false
     @State private var mediaErrorMessage: String?
+    @State private var beatCatalog: [ProducerBeat] = []
+    @State private var isLoadingBeatCatalog = false
+    @State private var beatCatalogErrorMessage: String?
+    @State private var pendingBeatDownloadIds: Set<String> = []
+    @State private var beatDownloadErrorMessage: String?
+    @State private var beatDownloadSuccessMessage: String?
+    @State private var beatDownloadRequests: [BeatDownloadRequest] = []
+    @State private var beatDownloadRequesterProfiles: [String: UserProfile] = [:]
+    @State private var isLoadingBeatDownloadRequests = false
+    @State private var beatDownloadRequestsErrorMessage: String?
+    @State private var hasLoadedBeatDownloadRequests = false
+    @State private var processingBeatDownloadRequestIds: Set<String> = []
+    @State private var beatDownloadManagementMessage: String?
+    @State private var beatDownloadManagementErrorMessage: String?
+    @State private var beatDownloadManagementMessageTask: Task<Void, Never>?
     @State private var presentedFollowList: FollowConnectionsKind?
     @State private var isShowingReportSheet = false
     @State private var reportToastMessage: String?
@@ -37,6 +53,9 @@ struct ArtistDetailView: View {
                 ScrollView(.vertical, showsIndicators: false) {
                     VStack(alignment: .leading, spacing: Theme.spacingLarge) {
                         heroSection(for: profile)
+                        if profile.accountType == .producer {
+                            beatCatalogSection(for: profile)
+                        }
                         if profile.accountType.supportsProfileMediaLibrary {
                             mediaSection(for: profile)
                         }
@@ -144,6 +163,8 @@ struct ArtistDetailView: View {
         .onDisappear {
             reportToastTask?.cancel()
             reportToastTask = nil
+            beatDownloadManagementMessageTask?.cancel()
+            beatDownloadManagementMessageTask = nil
         }
     }
 
@@ -294,6 +315,282 @@ struct ArtistDetailView: View {
         default:
             return Theme.primaryColor
         }
+    }
+
+    private func beatCatalogSection(for profile: UserProfile) -> some View {
+        sectionCard(title: "Beat Catalog", icon: "music.note.list") {
+            VStack(alignment: .leading, spacing: Theme.spacingMedium) {
+                if isLoadingBeatCatalog {
+                    ProgressView("Loading catalog…")
+                        .progressViewStyle(.circular)
+                } else if let message = beatCatalogErrorMessage {
+                    Label(message, systemImage: "exclamationmark.triangle")
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                } else if beatCatalog.isEmpty {
+                    Text("No beats listed yet. Producers can add beats from their catalog manager.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Browse \(beatCatalog.count) beat\(beatCatalog.count == 1 ? "" : "s") from this producer.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    if let successMessage = beatDownloadSuccessMessage, successMessage.isEmpty == false {
+                        Text(successMessage)
+                            .font(.footnote)
+                            .foregroundStyle(Theme.primaryColor)
+                    }
+                    if let downloadMessage = beatDownloadErrorMessage, downloadMessage.isEmpty == false {
+                        Text(downloadMessage)
+                            .font(.footnote)
+                            .foregroundStyle(Color.red.opacity(0.85))
+                    }
+                }
+
+                NavigationLink {
+                    ArtistBeatCatalogView(
+                        profile: profile,
+                        beats: $beatCatalog,
+                        isLoading: $isLoadingBeatCatalog,
+                        errorMessage: $beatCatalogErrorMessage,
+                        pendingDownloadIds: $pendingBeatDownloadIds,
+                        downloadErrorMessage: $beatDownloadErrorMessage,
+                        reloadAction: {
+                            await loadBeatCatalog(for: profile)
+                        },
+                        onRequestDownload: { beat in
+                            return await handleBeatDownload(beat: beat, producerId: profile.id)
+                        }
+                    )
+                } label: {
+                    HStack(alignment: .center, spacing: Theme.spacingMedium) {
+                        Image(systemName: "arrow.up.right.square")
+                            .font(.title3.weight(.semibold))
+                            .foregroundStyle(Theme.primaryColor)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("View Beat Catalog")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.primary)
+
+                            Text("Open the full beat catalog with previews and download requests.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Spacer()
+
+                        Image(systemName: "chevron.right")
+                            .font(.subheadline.weight(.bold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 12)
+                    .padding(.horizontal, Theme.spacingMedium)
+                    .background(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .fill(Theme.primaryColor.opacity(0.12))
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Open beat catalog for \(profile.displayName.isEmpty ? profile.username : profile.displayName)")
+
+                if shouldShowBeatDownloadRequests(for: profile) {
+                    beatDownloadRequestsSection(for: profile)
+                }
+            }
+        }
+        .task {
+            await loadBeatCatalogIfNeeded(for: profile)
+            await loadBeatDownloadRequestsIfNeeded(for: profile)
+        }
+    }
+
+    @ViewBuilder
+    private func beatDownloadRequestsSection(for profile: UserProfile) -> some View {
+        VStack(alignment: .leading, spacing: Theme.spacingSmall) {
+            HStack(spacing: Theme.spacingSmall) {
+                Image(systemName: "tray.and.arrow.down.fill")
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(Theme.primaryColor)
+                Text("Pending Download Requests")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                Spacer(minLength: 0)
+                if isLoadingBeatDownloadRequests {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Button {
+                        Task { await loadBeatDownloadRequests(for: profile) }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.subheadline.weight(.semibold))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Refresh download requests")
+                    .disabled(isLoadingBeatDownloadRequests)
+                }
+            }
+
+            if isLoadingBeatDownloadRequests && beatDownloadRequests.isEmpty {
+                ProgressView("Checking requests…")
+                    .progressViewStyle(.circular)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else if let message = beatDownloadRequestsErrorMessage {
+                Label(message, systemImage: "exclamationmark.triangle")
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            } else {
+                let pendingRequests = beatDownloadRequests.filter { $0.status == .pending }
+                if pendingRequests.isEmpty {
+                    Text("No pending download requests yet. We'll surface them here when artists ask to access your stems or previews.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else {
+                    VStack(spacing: Theme.spacingSmall) {
+                        ForEach(pendingRequests) { request in
+                            beatDownloadRequestRow(for: request, profile: profile)
+                        }
+                    }
+                }
+            }
+
+            if let managementMessage = beatDownloadManagementMessage {
+                Text(managementMessage)
+                    .font(.footnote)
+                    .foregroundStyle(Theme.primaryColor)
+                    .transition(.opacity)
+            }
+
+            if let managementError = beatDownloadManagementErrorMessage {
+                Text(managementError)
+                    .font(.footnote)
+                    .foregroundStyle(Color.red.opacity(0.85))
+                    .transition(.opacity)
+            }
+        }
+        .padding(.top, Theme.spacingSmall)
+    }
+
+    private func beatDownloadRequestRow(for request: BeatDownloadRequest, profile: UserProfile) -> some View {
+        let isProcessing = processingBeatDownloadRequestIds.contains(request.id)
+        let isReadyToShare = downloadReady(for: request)
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(requesterDisplayName(for: request))
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                Spacer(minLength: 0)
+                Text(request.createdAt, style: .relative)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if isProcessing {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+
+            Text("requested \"\(beatTitle(for: request))\"")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: Theme.spacingSmall) {
+                Button {
+                    Task {
+                        await handleBeatDownloadDecision(for: request, decision: .approve, profile: profile)
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "checkmark.circle.fill")
+                        Text("Share Files")
+                    }
+                    .font(.caption.weight(.semibold))
+                    .padding(.vertical, 8)
+                    .padding(.horizontal, 12)
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.plain)
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Theme.primaryColor)
+                )
+                .foregroundStyle(.white)
+                .disabled(isProcessing || isReadyToShare == false)
+                .opacity((isProcessing || isReadyToShare == false) ? 0.55 : 1)
+
+                Button(role: .destructive) {
+                    Task {
+                        await handleBeatDownloadDecision(for: request, decision: .reject, profile: profile)
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "xmark.circle")
+                        Text("Decline")
+                    }
+                    .font(.caption.weight(.semibold))
+                    .padding(.vertical, 8)
+                    .padding(.horizontal, 12)
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.plain)
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.red.opacity(0.12))
+                )
+                .foregroundStyle(Color.red.opacity(0.9))
+                .disabled(isProcessing)
+            }
+            .padding(.top, Theme.spacingSmall * 0.85)
+
+            if isReadyToShare == false {
+                Text("Upload a preview or stems archive before sharing files.")
+                    .font(.caption2)
+                    .foregroundStyle(Color.red.opacity(0.75))
+            }
+        }
+        .padding(.vertical, 12)
+        .padding(.horizontal, Theme.spacingMedium)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Theme.cardBackground.opacity(0.88))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Theme.primaryColor.opacity(0.08), lineWidth: 1)
+        )
+    }
+
+    private func requesterDisplayName(for request: BeatDownloadRequest) -> String {
+        guard let profile = beatDownloadRequesterProfiles[request.requesterId] else {
+            return "New artist"
+        }
+
+        let trimmedDisplay = profile.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedDisplay.isEmpty == false {
+            return trimmedDisplay
+        }
+
+        let trimmedUsername = profile.username.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedUsername.isEmpty == false else { return "New artist" }
+        return "@\(trimmedUsername)"
+    }
+
+    private func beatTitle(for request: BeatDownloadRequest) -> String {
+        if let storedTitle = request.beatTitle?.trimmingCharacters(in: .whitespacesAndNewlines), storedTitle.isEmpty == false {
+            return storedTitle
+        }
+        if let beat = beatCatalog.first(where: { $0.id == request.beatId }) {
+            let trimmed = beat.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty == false {
+                return trimmed
+            }
+        }
+        return "Untitled Beat"
+    }
+
+    private func downloadReady(for request: BeatDownloadRequest) -> Bool {
+        guard let beat = beatCatalog.first(where: { $0.id == request.beatId }) else { return false }
+        return beat.stemsZipURL != nil || beat.previewURL != nil
     }
 
     private func followSummarySection(for profile: UserProfile) -> some View {
@@ -453,7 +750,8 @@ struct ArtistDetailView: View {
 
     private func collaborationSection(for profile: UserProfile) -> some View {
         sectionCard(title: "Collaboration", icon: "hand.wave.fill") {
-            Text("Want to collaborate with \(profile.displayName.isEmpty ? profile.username : profile.displayName)? Send a message or invite them to a session once booking opens.")
+            let name = profile.displayName.isEmpty ? profile.username : profile.displayName
+            Text("Want to collaborate with \(name)? Send a message or invite them to a session once booking opens.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.leading)
@@ -660,7 +958,6 @@ struct ArtistDetailView: View {
         }
     }
 
-    @MainActor
     private func refreshFollowStatsIfNeeded() async {
         guard let profile else {
             isLoadingFollowStats = false
@@ -748,6 +1045,179 @@ struct ArtistDetailView: View {
     }
 
     @MainActor
+    private func loadBeatCatalogIfNeeded(for profile: UserProfile) async {
+        guard profile.accountType == .producer else { return }
+        guard beatCatalog.isEmpty else { return }
+        await loadBeatCatalog(for: profile)
+    }
+
+    @MainActor
+    private func loadBeatCatalog(for profile: UserProfile) async {
+        guard profile.accountType == .producer else { return }
+        guard isLoadingBeatCatalog == false else { return }
+        isLoadingBeatCatalog = true
+        defer { isLoadingBeatCatalog = false }
+        do {
+            let beats = try await di.firestoreService.fetchBeatCatalog(for: profile.id, includeUnpublished: false)
+            beatCatalog = beats
+            beatCatalogErrorMessage = nil
+            if shouldShowBeatDownloadRequests(for: profile) {
+                await loadBeatDownloadRequests(for: profile)
+            }
+        } catch {
+            beatCatalogErrorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    private func shouldShowBeatDownloadRequests(for profile: UserProfile) -> Bool {
+        guard profile.accountType == .producer else { return false }
+        guard let currentUser = appState.currentUser else { return false }
+        return currentUser.id == profile.id
+    }
+
+    @MainActor
+    private func loadBeatDownloadRequestsIfNeeded(for profile: UserProfile) async {
+        guard shouldShowBeatDownloadRequests(for: profile) else { return }
+        guard hasLoadedBeatDownloadRequests == false else { return }
+        await loadBeatDownloadRequests(for: profile)
+    }
+
+    @MainActor
+    private func loadBeatDownloadRequests(for profile: UserProfile) async {
+        guard shouldShowBeatDownloadRequests(for: profile) else { return }
+        guard isLoadingBeatDownloadRequests == false else { return }
+        isLoadingBeatDownloadRequests = true
+        defer { isLoadingBeatDownloadRequests = false }
+        beatDownloadManagementErrorMessage = nil
+        do {
+            let requests = try await di.firestoreService.fetchBeatDownloadRequests(
+                for: profile.id,
+                status: .pending
+            )
+            beatDownloadRequests = requests
+            hasLoadedBeatDownloadRequests = true
+            beatDownloadRequestsErrorMessage = nil
+
+            let requesterIds = Set(requests.map { $0.requesterId })
+            if requesterIds.isEmpty {
+                beatDownloadRequesterProfiles = [:]
+            } else if let profiles = try? await di.firestoreService.fetchUserProfiles(for: Array(requesterIds)) {
+                beatDownloadRequesterProfiles = Dictionary(uniqueKeysWithValues: profiles.map { ($0.id, $0) })
+            } else {
+                beatDownloadRequesterProfiles = [:]
+            }
+        } catch {
+            beatDownloadRequestsErrorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            if hasLoadedBeatDownloadRequests == false {
+                beatDownloadRequests = []
+                beatDownloadRequesterProfiles = [:]
+            }
+        }
+    }
+
+    private enum BeatDownloadDecision {
+        case approve
+        case reject
+    }
+
+    @MainActor
+    private func handleBeatDownloadDecision(
+        for request: BeatDownloadRequest,
+        decision: BeatDownloadDecision,
+        profile: UserProfile
+    ) async {
+        guard processingBeatDownloadRequestIds.contains(request.id) == false else { return }
+        processingBeatDownloadRequestIds.insert(request.id)
+        defer { processingBeatDownloadRequestIds.remove(request.id) }
+
+        beatDownloadManagementErrorMessage = nil
+        beatDownloadManagementMessageTask?.cancel()
+        beatDownloadManagementMessageTask = nil
+        beatDownloadManagementMessage = nil
+
+        guard shouldShowBeatDownloadRequests(for: profile) else { return }
+
+        var downloadURL: URL?
+
+        if decision == .approve {
+            guard let beat = beatCatalog.first(where: { $0.id == request.beatId }) else {
+                beatDownloadManagementErrorMessage = "We couldn't find that beat anymore."
+                return
+            }
+
+            guard let shareURL = beat.stemsZipURL ?? beat.previewURL else {
+                beatDownloadManagementErrorMessage = "Upload a download-ready file before approving this request."
+                return
+            }
+
+            downloadURL = shareURL
+        }
+
+        do {
+            let newStatus: BeatDownloadRequest.Status = decision == .approve ? .fulfilled : .rejected
+            try await di.firestoreService.updateBeatDownloadRequest(request, status: newStatus, downloadURL: downloadURL)
+
+            withAnimation {
+                beatDownloadRequests.removeAll { $0.id == request.id }
+            }
+
+            beatDownloadManagementErrorMessage = nil
+
+            let feedback: String
+            if decision == .approve {
+                feedback = "Shared files with \(requesterDisplayName(for: request))."
+            } else {
+                feedback = "Declined download request from \(requesterDisplayName(for: request))."
+            }
+
+            withAnimation {
+                beatDownloadManagementMessage = feedback
+            }
+            beatDownloadManagementMessageTask = Task {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                await MainActor.run {
+                    withAnimation {
+                        beatDownloadManagementMessage = nil
+                    }
+                }
+            }
+        } catch {
+            beatDownloadManagementErrorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func handleBeatDownload(beat: ProducerBeat, producerId: String) async -> Bool {
+        guard pendingBeatDownloadIds.contains(beat.id) == false else { return false }
+        guard let currentUser = appState.currentUser else {
+            beatDownloadErrorMessage = "Sign in to request downloads to your drive."
+            return false
+        }
+
+        pendingBeatDownloadIds.insert(beat.id)
+        defer { pendingBeatDownloadIds.remove(beat.id) }
+        beatDownloadErrorMessage = nil
+        beatDownloadSuccessMessage = nil
+
+        do {
+            let request = BeatDownloadRequest(
+                beatId: beat.id,
+                producerId: producerId,
+                requesterId: currentUser.id,
+                beatTitle: beat.title
+            )
+            try await di.firestoreService.submitBeatDownloadRequest(request)
+            beatDownloadErrorMessage = nil
+            beatDownloadSuccessMessage = "Request sent! We'll notify you once the producer shares the files."
+            showReportToast("We’ll notify you once the producer shares the files.")
+            return true
+        } catch {
+            beatDownloadErrorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            return false
+        }
+    }
+
+    @MainActor
     private func showReportToast(_ message: String) {
         reportToastTask?.cancel()
         withAnimation { reportToastMessage = message }
@@ -807,10 +1277,22 @@ private struct CreativeInfoPill: View {
     }
 }
 
-#Preview("Artist Detail") {
-    NavigationStack {
-        ArtistDetailView(artistId: "preview", profile: .mock)
-            .environment(\.di, DIContainer.makeMock())
+#Preview("Producer Detail") {
+    let di = DIContainer.makeMock()
+    let profile = UserProfile.previewProducer
+
+    if let firestore = di.firestoreService as? MockFirestoreService {
+        firestore.seedUserProfile(profile)
+        var primaryBeat = ProducerBeat.mock
+        primaryBeat.producerId = profile.id
+        var exclusiveBeat = ProducerBeat.exclusiveMock
+        exclusiveBeat.producerId = profile.id
+        firestore.seedBeatCatalog(for: profile.id, beats: [primaryBeat, exclusiveBeat])
+    }
+
+    return NavigationStack {
+        ArtistDetailView(artistId: profile.id, profile: profile, heroStyle: .standard)
+            .environment(\.di, di)
             .environmentObject(ArtistDetailView.previewAppState)
     }
 }

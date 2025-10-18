@@ -37,7 +37,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		0BD53E322E80CC0D00E2E9CB /* Punch-In.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Punch-In.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		0BD53E322E80CC0D00E2E9CB /* Punch-In Collab.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Punch-In Collab.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		0BD53E3F2E80CC0F00E2E9CB /* Punch-InTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Punch-InTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		0BD53E492E80CC0F00E2E9CB /* Punch-InUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Punch-InUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -108,7 +108,7 @@
 		0BD53E332E80CC0D00E2E9CB /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				0BD53E322E80CC0D00E2E9CB /* Punch-In.app */,
+				0BD53E322E80CC0D00E2E9CB /* Punch-In Collab.app */,
 				0BD53E3F2E80CC0F00E2E9CB /* Punch-InTests.xctest */,
 				0BD53E492E80CC0F00E2E9CB /* Punch-InUITests.xctest */,
 			);
@@ -118,9 +118,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		0BD53E312E80CC0D00E2E9CB /* Punch-In */ = {
+		0BD53E312E80CC0D00E2E9CB /* Punch-In Collab */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 0BD53E532E80CC0F00E2E9CB /* Build configuration list for PBXNativeTarget "Punch-In" */;
+			buildConfigurationList = 0BD53E532E80CC0F00E2E9CB /* Build configuration list for PBXNativeTarget "Punch-In Collab" */;
 			buildPhases = (
 				0BD53E2E2E80CC0D00E2E9CB /* Sources */,
 				0BD53E2F2E80CC0D00E2E9CB /* Frameworks */,
@@ -133,7 +133,7 @@
 			fileSystemSynchronizedGroups = (
 				0BD53E342E80CC0D00E2E9CB /* Punch-In */,
 			);
-			name = "Punch-In";
+			name = "Punch-In Collab";
 			packageProductDependencies = (
 				8A2679D30133577FF4E20463 /* FirebaseAuth */,
 				2FCABDFD70A56EC067380344 /* FirebaseFirestore */,
@@ -142,7 +142,7 @@
 				6F64CB1F1363A7D99A53143E /* GoogleSignIn */,
 			);
 			productName = "Punch-In";
-			productReference = 0BD53E322E80CC0D00E2E9CB /* Punch-In.app */;
+			productReference = 0BD53E322E80CC0D00E2E9CB /* Punch-In Collab.app */;
 			productType = "com.apple.product-type.application";
 		};
 		0BD53E3E2E80CC0F00E2E9CB /* Punch-InTests */ = {
@@ -232,7 +232,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				0BD53E312E80CC0D00E2E9CB /* Punch-In */,
+				0BD53E312E80CC0D00E2E9CB /* Punch-In Collab */,
 				0BD53E3E2E80CC0F00E2E9CB /* Punch-InTests */,
 				0BD53E482E80CC0F00E2E9CB /* Punch-InUITests */,
 			);
@@ -290,12 +290,12 @@
 /* Begin PBXTargetDependency section */
 		0BD53E412E80CC0F00E2E9CB /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = 0BD53E312E80CC0D00E2E9CB /* Punch-In */;
+			target = 0BD53E312E80CC0D00E2E9CB /* Punch-In Collab */;
 			targetProxy = 0BD53E402E80CC0F00E2E9CB /* PBXContainerItemProxy */;
 		};
 		0BD53E4B2E80CC0F00E2E9CB /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = 0BD53E312E80CC0D00E2E9CB /* Punch-In */;
+			target = 0BD53E312E80CC0D00E2E9CB /* Punch-In Collab */;
 			targetProxy = 0BD53E4A2E80CC0F00E2E9CB /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
@@ -433,6 +433,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Punch-In Collaboration";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -457,6 +458,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Punch-In Collaboration";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -554,7 +556,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		0BD53E532E80CC0F00E2E9CB /* Build configuration list for PBXNativeTarget "Punch-In" */ = {
+		0BD53E532E80CC0F00E2E9CB /* Build configuration list for PBXNativeTarget "Punch-In Collab" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				0BD53E542E80CC0F00E2E9CB /* Debug */,

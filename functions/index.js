@@ -205,6 +205,121 @@ export const notifyMediaRating = functions
     return null;
   });
 
+export const notifyBeatDownloadRequest = functions
+  .region('us-central1')
+  .firestore.document('beatDownloadRequests/{requestId}')
+  .onCreate(async (snapshot) => {
+    const request = snapshot.data();
+    if (!request) {
+      return null;
+    }
+
+    const { producerId, requesterId, beatId } = request;
+    if (!producerId || producerId === requesterId) {
+      return null;
+    }
+
+    const [beatSnap, requesterSnap] = await Promise.all([
+      db.collection('users').doc(producerId).collection('beatCatalog').doc(beatId).get(),
+      requesterId ? db.collection('users').doc(requesterId).get() : null,
+    ]);
+
+    const beat = beatSnap.exists ? beatSnap.data() || {} : {};
+    const requester = requesterSnap?.exists ? requesterSnap.data() || {} : {};
+    const beatTitle = beat.title || 'one of your beats';
+    const requesterName = requester.displayName || requester.username || 'Someone';
+
+    await createAlert(producerId, {
+      title: 'Download request received',
+      message: `${requesterName} requested files for "${beatTitle}".`,
+      category: 'media',
+      deeplink: null,
+    });
+
+    return null;
+  });
+
+export const notifyBeatDownloadDecision = functions
+  .region('us-central1')
+  .firestore.document('beatDownloadRequests/{requestId}')
+  .onUpdate(async (change) => {
+    const before = change.before.data();
+    const after = change.after.data();
+
+    if (!before || !after) {
+      return null;
+    }
+
+    if (before.status === after.status) {
+      return null;
+    }
+
+    const { requesterId, producerId, beatId, status } = after;
+    if (!requesterId || requesterId === producerId) {
+      return null;
+    }
+
+    const beatSnap = beatId
+      ? await db.collection('users').doc(producerId).collection('beatCatalog').doc(beatId).get()
+      : null;
+    const beat = beatSnap?.exists ? beatSnap.data() || {} : {};
+    const beatTitle = after.beatTitle || beat.title || 'your requested beat';
+
+    const requesterRef = db
+      .collection('users')
+      .doc(requesterId)
+      .collection('driveDownloadRequests')
+      .doc(change.after.id);
+
+    if (status === 'fulfilled') {
+      await requesterRef.set(buildDrivePayload(after, beatTitle), { merge: true });
+
+      await createAlert(requesterId, {
+        title: 'Download ready',
+        message: `Files for "${beatTitle}" are ready to download.`,
+        category: 'media',
+        deeplink: null,
+      });
+    } else if (status === 'rejected') {
+      await requesterRef.set(buildDrivePayload(after, beatTitle), { merge: true });
+
+      await createAlert(requesterId, {
+        title: 'Download request declined',
+        message: `The producer declined your request for "${beatTitle}".`,
+        category: 'media',
+        deeplink: null,
+      });
+    }
+
+    return null;
+  });
+
+function buildDrivePayload(request, beatTitle) {
+  const payload = {
+    status: request.status,
+    updatedAt: request.updatedAt ?? FieldValue.serverTimestamp(),
+    producerId: request.producerId,
+    requesterId: request.requesterId,
+    beatId: request.beatId,
+  };
+
+  if (request.createdAt) {
+    payload.createdAt = request.createdAt;
+  }
+
+  if (beatTitle) {
+    payload.beatTitle = beatTitle;
+  }
+
+  if (request.status === 'fulfilled' && request.downloadURL) {
+    payload.downloadURL = request.downloadURL;
+  } else {
+    payload.downloadURL = FieldValue.delete();
+  }
+
+  return payload;
+}
+
 async function ensureBookingHolds(booking, bookingId) {
   const start = booking.confirmedStart ?? booking.requestedStart;
   const end = booking.confirmedEnd ?? booking.requestedEnd;

@@ -1,6 +1,40 @@
 import Foundation
 
 struct UserProfile: Identifiable, Equatable, Codable {
+    enum DrivePlan: String, CaseIterable, Identifiable, Codable {
+        case free
+        case subscribed
+
+        var id: String { rawValue }
+
+        var storageLimitBytes: Int {
+            switch self {
+            case .free:
+                return 3 * 1024 * 1024 * 1024
+            case .subscribed:
+                return 10 * 1024 * 1024 * 1024
+            }
+        }
+
+        var displayName: String {
+            switch self {
+            case .free:
+                return "Free"
+            case .subscribed:
+                return "Subscribed"
+            }
+        }
+
+        var storageDescription: String {
+            switch self {
+            case .free:
+                return "Includes 3 GB of project storage"
+            case .subscribed:
+                return "Includes 10 GB of project storage"
+            }
+        }
+    }
+
     let id: String
     var username: String
     var displayName: String
@@ -10,6 +44,7 @@ struct UserProfile: Identifiable, Equatable, Codable {
     var profileDetails: AccountProfileDetails
     var contact: UserContactInfo
     var engineerSettings: EngineerSettings
+    var drivePlan: DrivePlan = .free
 
     var mediaCapabilities: ProfileMediaCapabilities {
         accountType.mediaCapabilities
@@ -31,7 +66,16 @@ struct UserProfile: Identifiable, Equatable, Codable {
         }
         merged.contact = remote.contact
         merged.engineerSettings = remote.engineerSettings
+        merged.drivePlan = remote.drivePlan
         return merged
+    }
+
+    var driveStorageLimitBytes: Int {
+        drivePlan.storageLimitBytes
+    }
+
+    var hasDriveStorageAccess: Bool {
+        driveStorageLimitBytes > 0
     }
 }
 
@@ -70,7 +114,8 @@ extension UserProfile {
             ]
         ),
         contact: UserContactInfo(),
-        engineerSettings: EngineerSettings()
+        engineerSettings: EngineerSettings(),
+        drivePlan: .subscribed
     )
 
     static let mockEngineer = UserProfile(
@@ -105,7 +150,34 @@ extension UserProfile {
             ]
         ),
         contact: UserContactInfo(email: "jamie@example.com", phoneNumber: "555-0102"),
-        engineerSettings: EngineerSettings(isPremium: true, instantBookEnabled: true)
+        engineerSettings: EngineerSettings(isPremium: true, instantBookEnabled: true),
+        drivePlan: .subscribed
+    )
+
+    static let previewProducer = UserProfile(
+        id: UUID().uuidString,
+        username: "beatcraft",
+        displayName: "Beatcraft Labs",
+        createdAt: Date(),
+        profileImageURL: nil,
+        accountType: .producer,
+        profileDetails: AccountProfileDetails(
+            bio: "Producer blending analog synths with modern trap drums.",
+            fieldOne: "Trap & R&B",
+            fieldTwo: "Credits with indie breakout artists",
+            upcomingProjects: [
+                ProfileSpotlight(
+                    category: .project,
+                    title: "Beat tape \"Night Signals\"",
+                    detail: "A curated pack of late-night instrumentals for vocalists and rappers.",
+                    scheduledAt: Calendar.current.date(byAdding: .month, value: 1, to: Date())
+                )
+            ],
+            upcomingEvents: []
+        ),
+        contact: UserContactInfo(email: "beats@beatcraft.com", phoneNumber: "555-0112"),
+        engineerSettings: EngineerSettings(),
+        drivePlan: .subscribed
     )
 }
 

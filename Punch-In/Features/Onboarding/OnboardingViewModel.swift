@@ -112,9 +112,7 @@ final class OnboardingViewModel: ObservableObject {
 
         var updatedProfile = existingProfile
         updatedProfile.username = trimmedUsername
-        if existingProfile.displayName.isEmpty {
-            updatedProfile.displayName = trimmedUsername
-        }
+        updatedProfile.displayName = trimmedUsername
         updatedProfile.accountType = selectedAccountType
         updatedProfile.profileDetails = AccountProfileDetails(
             bio: publicBio.trimmed,

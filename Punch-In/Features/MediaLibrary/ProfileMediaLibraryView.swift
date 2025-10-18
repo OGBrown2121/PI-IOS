@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ProfileMediaLibraryView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.di) private var di
     @EnvironmentObject private var uploadManager: ProfileMediaUploadManager
     @StateObject private var viewModel: ProfileMediaLibraryViewModel
     @State private var editorDraft: ProfileMediaDraft?
@@ -66,6 +67,7 @@ struct ProfileMediaLibraryView: View {
                     media: media,
                     firestoreService: viewModel.firestoreService,
                     storageService: viewModel.storageService,
+                    reportService: di.reportService,
                     currentUserProvider: viewModel.currentUserProvider,
                     libraryViewModel: viewModel
                 )

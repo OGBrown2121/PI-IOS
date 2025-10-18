@@ -24,6 +24,9 @@ struct SettingsView: View {
                 if let profile = appState.currentUser {
                     profileSummarySection(profile)
                     profileActionsSection(profile)
+                    if profile.accountType.isArtistFamily {
+                        DriveDownloadRequestsCard(profile: profile)
+                    }
                     if profile.accountType.canViewStudioOwnerTools {
                         ownerToolsSection
                     }
@@ -172,6 +175,21 @@ private extension SettingsView {
                     )
                 } label: {
                     liquidAction(title: "Manage Media Library", icon: "tray.and.arrow.up", chevron: true)
+                }
+                .buttonStyle(.plain)
+            }
+
+            if profile.accountType == .producer {
+                NavigationLink {
+                    BeatCatalogManagerView(
+                        viewModel: BeatCatalogManagerViewModel(
+                            firestore: di.firestoreService,
+                            storage: di.storageService,
+                            currentUserProvider: { appState.currentUser }
+                        )
+                    )
+                } label: {
+                    liquidAction(title: "Manage Beat Catalog", icon: "music.note.list", chevron: true)
                 }
                 .buttonStyle(.plain)
             }

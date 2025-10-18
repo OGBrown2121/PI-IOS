@@ -12,9 +12,13 @@ struct ProfileMediaDetailView: View {
     @State private var isShowingRatingAlert = false
     @State private var isScrubbingPlayback = false
     @State private var scrubbingProgress: Double = 0
+    @State private var isShowingReportSheet = false
+    @State private var reportToastMessage: String?
+    @State private var reportToastTask: Task<Void, Never>?
 
     private let firestoreService: any FirestoreService
     private let storageService: any StorageService
+    private let reportService: any ReportService
     private let currentUserProvider: () -> UserProfile?
     private var libraryViewModel: ProfileMediaLibraryViewModel?
     @EnvironmentObject private var uploadManager: ProfileMediaUploadManager
@@ -23,12 +27,14 @@ struct ProfileMediaDetailView: View {
         media: ProfileMediaItem,
         firestoreService: any FirestoreService,
         storageService: any StorageService,
+        reportService: any ReportService,
         currentUserProvider: @escaping () -> UserProfile?,
         libraryViewModel: ProfileMediaLibraryViewModel? = nil
     ) {
         _viewModel = StateObject(wrappedValue: ProfileMediaDetailViewModel(media: media, firestoreService: firestoreService, currentUserProvider: currentUserProvider))
         self.firestoreService = firestoreService
         self.storageService = storageService
+        self.reportService = reportService
         self.currentUserProvider = currentUserProvider
         self.libraryViewModel = libraryViewModel
     }
@@ -43,6 +49,9 @@ struct ProfileMediaDetailView: View {
                     infoSection
                     collaboratorsSection
                     metadataSection
+                    if viewModel.isOwner == false {
+                        reportSongSection
+                    }
                 }
                 .padding()
             }
@@ -69,6 +78,19 @@ struct ProfileMediaDetailView: View {
                 )
             }
         }
+        .sheet(isPresented: $isShowingReportSheet) {
+            ReportMediaView(
+                viewModel: ReportMediaViewModel(
+                    media: viewModel.media,
+                    reportService: reportService,
+                    storageService: storageService,
+                    currentUserProvider: currentUserProvider
+                ),
+                onSubmitted: {
+                    showReportToast("Thanks for letting us know.")
+                }
+            )
+        }
         .alert("Rating failed", isPresented: $isShowingRatingAlert) {
             Button("Dismiss", role: .cancel) { viewModel.ratingError = nil }
         } message: {
@@ -84,6 +106,11 @@ struct ProfileMediaDetailView: View {
             guard let current, current.id == viewModel.media.id else { return }
             viewModel.refresh(with: current)
             libraryViewModel?.refreshItem(current)
+        }
+        .toast(message: $reportToastMessage, bottomInset: 120)
+        .onDisappear {
+            reportToastTask?.cancel()
+            reportToastTask = nil
         }
     }
 
@@ -135,7 +162,7 @@ struct ProfileMediaDetailView: View {
                             .opacity(colorScheme == .dark ? 0.9 : 0.5)
                     }
                     .shadow(color: Theme.primaryGradientEnd.opacity(0.25), radius: 24, y: 12)
-                    .frame(height: 240)
+                    .frame(width: artworkSize, height: artworkSize)
             }
 
             if viewModel.media.format == .audio {
@@ -243,6 +270,14 @@ struct ProfileMediaDetailView: View {
                 .font(.caption)
             }
         }
+        .frame(maxWidth: .infinity)
+    }
+
+    private var artworkSize: CGFloat {
+        let horizontalPadding: CGFloat = 72
+        let maxLength: CGFloat = 260
+        let screenWidth = UIScreen.main.bounds.width
+        return min(maxLength, screenWidth - horizontalPadding)
     }
 
     private var collaboratorsSection: some View {
@@ -291,6 +326,57 @@ struct ProfileMediaDetailView: View {
             Text("Uploaded: \(viewModel.media.createdAt.formatted(date: .abbreviated, time: .shortened))")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    private var reportSongSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                isShowingReportSheet = true
+            } label: {
+                HStack(spacing: 16) {
+                    ZStack {
+                        Circle()
+                            .fill(Color.red.opacity(colorScheme == .dark ? 0.35 : 0.18))
+                            .frame(width: 44, height: 44)
+                        Image(systemName: "flag.fill")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundStyle(Color.red)
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(reportButtonTitle)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.primary)
+                        Text("Let us know if this upload breaks community guidelines.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+
+                    Image(systemName: "chevron.right")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 18)
+                .background(
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .fill(Color.red.opacity(colorScheme == .dark ? 0.14 : 0.08))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .stroke(Color.red.opacity(colorScheme == .dark ? 0.4 : 0.2), lineWidth: 1)
+                )
+            }
+            .buttonStyle(.plain)
+
+            if viewModel.currentUser == nil {
+                Text("Sign in to submit a report.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -559,6 +645,22 @@ struct ProfileMediaDetailView: View {
         } catch {
             Logger.log("Failed to refresh media detail: \(error.localizedDescription)")
         }
+    }
+
+    @MainActor
+    private func showReportToast(_ message: String) {
+        reportToastTask?.cancel()
+        withAnimation { reportToastMessage = message }
+        reportToastTask = Task {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            await MainActor.run {
+                withAnimation { reportToastMessage = nil }
+            }
+        }
+    }
+
+    private var reportButtonTitle: String {
+        viewModel.media.format == .audio ? "Report song" : "Report upload"
     }
 
     private var ownerCapabilities: ProfileMediaCapabilities {

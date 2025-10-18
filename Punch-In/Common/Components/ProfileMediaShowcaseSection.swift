@@ -46,6 +46,7 @@ struct ProfileMediaShowcaseSection: View {
                     media: media,
                     firestoreService: di.firestoreService,
                     storageService: di.storageService,
+                    reportService: di.reportService,
                     currentUserProvider: { appState.currentUser }
                 )
             }

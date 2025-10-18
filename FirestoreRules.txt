@@ -48,13 +48,64 @@ service cloud.firestore {
 
     function validParticipantCount(data) {
       return (data.kind == 'direct' && participantIds(data).size() == 2)
-          || (data.kind == 'group' && participantIds(data).size() >= 2);
+          || (data.kind in ['group', 'project'] && participantIds(data).size() >= 2);
+    }
+
+    function validProjectTask(task) {
+      return task is map
+          && hasField(task, 'id') && task.id is string
+          && hasField(task, 'title') && task.title is string
+          && hasField(task, 'isComplete') && task.isComplete is bool;
+    }
+
+    function validProjectTasks(project) {
+      return !hasField(project, 'tasks')
+          || (
+            project.tasks is list
+            && project.tasks.where(task, validProjectTask(task)).size() == project.tasks.size()
+          );
+    }
+
+    function validProjectFile(file) {
+      return file is map
+          && hasField(file, 'id') && file.id is string
+          && hasField(file, 'name') && file.name is string && file.name.size() > 0
+          && hasField(file, 'storagePath') && file.storagePath is string && file.storagePath.size() > 0
+          && hasField(file, 'uploadedAt') && file.uploadedAt is timestamp
+          && hasField(file, 'uploadedBy') && file.uploadedBy is map
+          && (!hasField(file, 'url') || file.url is string)
+          && (!hasField(file, 'contentType') || file.contentType is string)
+          && (!hasField(file, 'fileSize') || file.fileSize is number);
+    }
+
+    function validProjectFiles(project) {
+      return !hasField(project, 'files')
+          || (
+            project.files is list
+            && project.files.where(file, validProjectFile(file)).size() == project.files.size()
+          );
+    }
+
+    function validProjectPayload(data) {
+      let project = data.project;
+      let isProject = data.kind == 'project';
+      let projectValid = project is map
+          && hasField(project, 'title') && project.title is string && project.title.size() > 0
+          && (!hasField(project, 'summary') || project.summary is string)
+          && (!hasField(project, 'sharedDriveURL') || project.sharedDriveURL is string)
+          && (!hasField(project, 'allowsDownloads') || project.allowsDownloads is bool)
+          && validProjectTasks(project)
+          && validProjectFiles(project);
+
+      return (isProject && projectValid)
+          || (!isProject && project == null);
     }
 
     function validConversationBase(data) {
-      return data.kind in ['direct', 'group']
+      return data.kind in ['direct', 'group', 'project']
           && validParticipantCount(data)
-          && validGroupSettings(data.groupSettings);
+          && validGroupSettings(data.groupSettings)
+          && validProjectPayload(data);
     }
 
     function validConversationCreate(data) {
@@ -198,7 +249,169 @@ service cloud.firestore {
           && data.reason in ['spam', 'inappropriateContent', 'harassment', 'fraud', 'impersonation', 'other']
           && data.createdAt is timestamp
           && (!hasField(data, 'details') || data.details is string)
-          && (!hasField(data, 'requiresFollowUp') || data.requiresFollowUp is bool);
+          && (!hasField(data, 'requiresFollowUp') || data.requiresFollowUp is bool)
+          && (!hasField(data, 'evidencePhotoURLs') || (data.evidencePhotoURLs is list && data.evidencePhotoURLs.size() <= 4));
+    }
+
+    function validMediaReport(data) {
+      return data.mediaId is string
+          && data.mediaId.size() > 0
+          && data.ownerId is string
+          && data.ownerId.size() > 0
+          && data.reporterUserId is string
+          && data.reporterUserId == request.auth.uid
+          && data.reason in ['spam', 'inappropriateContent', 'harassment', 'fraud', 'impersonation', 'other']
+          && data.createdAt is timestamp
+          && (!hasField(data, 'details') || data.details is string)
+          && (!hasField(data, 'requiresFollowUp') || data.requiresFollowUp is bool)
+          && (!hasField(data, 'evidencePhotoURLs') || (data.evidencePhotoURLs is list && data.evidencePhotoURLs.size() <= 4));
+    }
+
+    function validBeatLicense(license) {
+      return license in ['exclusive', 'nonExclusive', 'stemsIncluded', 'custom'];
+    }
+
+    function stemsZipURLValid(data) {
+      let hasUrl = hasField(data, 'stemsZipURL');
+      let url = hasUrl ? data.stemsZipURL : null;
+      return (!hasUrl || url is string)
+          && (data.stemsIncluded == false || (url is string && url.size() > 0));
+    }
+
+    function validBeatDoc(data) {
+      return data.keys().hasOnly([
+          'id',
+          'producerId',
+          'title',
+          'summary',
+          'license',
+          'priceCents',
+          'currencyCode',
+          'previewURL',
+          'artworkURL',
+          'stemsZipURL',
+          'bpm',
+          'musicalKey',
+          'durationSeconds',
+          'stemsIncluded',
+          'tags',
+          'primaryGenre',
+          'allowFreeDownload',
+          'isPublished',
+          'createdAt',
+          'updatedAt'
+        ])
+        && hasField(data, 'title') && data.title is string && data.title.size() > 0
+        && hasField(data, 'license') && validBeatLicense(data.license)
+        && hasField(data, 'priceCents') && data.priceCents is number && data.priceCents >= 0
+        && hasField(data, 'currencyCode') && data.currencyCode is string
+        && hasField(data, 'stemsIncluded') && data.stemsIncluded is bool
+        && hasField(data, 'isPublished') && data.isPublished is bool
+        && hasField(data, 'createdAt') && data.createdAt is timestamp
+        && hasField(data, 'updatedAt') && data.updatedAt is timestamp
+        && (!hasField(data, 'summary') || data.summary is string)
+        && (!hasField(data, 'previewURL') || data.previewURL is string)
+        && (!hasField(data, 'artworkURL') || data.artworkURL is string)
+        && stemsZipURLValid(data)
+        && (!hasField(data, 'bpm') || data.bpm is number)
+        && (!hasField(data, 'musicalKey') || data.musicalKey is string)
+        && (!hasField(data, 'durationSeconds') || data.durationSeconds is number)
+        && (!hasField(data, 'primaryGenre') || (
+          data.primaryGenre is string
+          && data.primaryGenre in [
+            'hip_hop',
+            'rnb',
+            'pop',
+            'rock',
+            'alternative',
+            'electronic',
+            'house',
+            'techno',
+            'dance',
+            'country',
+            'folk',
+            'jazz',
+            'blues',
+            'soul',
+            'gospel',
+            'latin',
+            'afrobeat',
+            'reggae',
+            'dancehall',
+            'metal',
+            'punk',
+            'classical',
+            'soundtrack',
+            'lo_fi',
+            'spoken_word',
+            'experimental'
+          ]
+        ))
+        && (!hasField(data, 'allowFreeDownload') || data.allowFreeDownload is bool)
+        && (!hasField(data, 'tags') || (
+          data.tags is list
+          && data.tags.size() <= 20
+        ));
+    }
+
+    function validBeatDownloadStatus(status) {
+      return status in ['pending', 'fulfilled', 'rejected'];
+    }
+
+    function validBeatDownloadRequestDoc(data) {
+      return data.keys().hasOnly([
+          'id',
+          'beatId',
+          'producerId',
+          'requesterId',
+          'beatTitle',
+          'downloadURL',
+          'status',
+          'createdAt',
+          'updatedAt'
+        ])
+        && hasField(data, 'beatId') && data.beatId is string
+        && hasField(data, 'producerId') && data.producerId is string
+        && hasField(data, 'requesterId') && data.requesterId is string
+        && hasField(data, 'status') && validBeatDownloadStatus(data.status)
+        && hasField(data, 'createdAt') && data.createdAt is timestamp
+        && hasField(data, 'updatedAt') && data.updatedAt is timestamp
+        && (!hasField(data, 'id') || data.id is string)
+        && (!hasField(data, 'beatTitle') || data.beatTitle is string)
+        && (!hasField(data, 'downloadURL') || data.downloadURL is string);
+    }
+
+    function beatDownloadStatusUpdateAllowed(before, after) {
+      let hasBoth = before != null && after != null;
+      let diff = hasBoth ? before.diff(after) : null;
+      let added = hasBoth ? diff.addedKeys() : [];
+      let removed = hasBoth ? diff.removedKeys() : [];
+      let changed = hasBoth ? diff.changedKeys() : [];
+
+      let baseValid = hasBoth
+          && (added.size() == 0 || added.hasOnly(['downloadURL']))
+          && (removed.size() == 0 || removed.hasOnly(['downloadURL']))
+          && before.beatId == after.beatId
+          && before.producerId == after.producerId
+          && before.requesterId == after.requesterId
+          && before.createdAt == after.createdAt
+          && (!hasField(before, 'id') || before.id == after.id)
+          && validBeatDownloadStatus(after.status)
+          && (before.status == after.status || (before.status == 'pending' && after.status in ['fulfilled', 'rejected']));
+
+      let changedStatusOnly = changed.hasOnly(['status', 'updatedAt']);
+      let changedWithURL = changed.hasOnly(['status', 'updatedAt', 'downloadURL']);
+
+      let downloadValid = (changedStatusOnly && (
+            (after.status != 'fulfilled' && !hasField(after, 'downloadURL')) ||
+            (after.status == 'fulfilled' && hasField(after, 'downloadURL') && after.downloadURL is string)
+          ))
+          || (changedWithURL && (
+            (after.status == 'fulfilled' && hasField(after, 'downloadURL') && after.downloadURL is string)
+            || (after.status != 'fulfilled' && !hasField(after, 'downloadURL'))
+          ));
+
+      return baseValid && downloadValid;
     }
 
     function isEngineerRequestForCurrentOwner(data) {
@@ -223,10 +436,10 @@ service cloud.firestore {
         && data.keys().hasOnly(['title', 'message', 'category', 'createdAt', 'isRead', 'deeplink', 'readAt']);
     }
 
-    function validAlertStatusPatch(data) {
-      return data.keys().hasOnly(['isRead', 'readAt'])
-        && (!hasField(data, 'isRead') || data.isRead is bool)
-        && (!hasField(data, 'readAt') || data.readAt is timestamp);
+    function validAlertStatusPatch() {
+      return request.writeFields.hasOnly(['isRead', 'readAt'])
+        && (!request.writeFields.hasAny(['isRead']) || request.resource.data.isRead is bool)
+        && (!request.writeFields.hasAny(['readAt']) || request.resource.data.readAt is timestamp);
     }
 
     function validMediaRatingDoc(data) {
@@ -235,6 +448,22 @@ service cloud.firestore {
         && data.rating >= 1 && data.rating <= 5
         && hasField(data, 'createdAt') && data.createdAt is timestamp
         && hasField(data, 'updatedAt') && data.updatedAt is timestamp;
+    }
+
+    function isPlayCountIncrement(before, after) {
+      return isSignedIn()
+          && before != null
+          && after != null
+          && after.keys().hasOnly(before.keys())
+          && before.keys().hasOnly(after.keys())
+          && hasField(before, 'playCount') && before.playCount is number
+          && hasField(after, 'playCount') && after.playCount is number
+          && hasField(after, 'updatedAt') && after.updatedAt is timestamp
+          && after.playCount == before.playCount + 1
+          && after.updatedAt == request.time
+          && before.diff(after).addedKeys().size() == 0
+          && before.diff(after).removedKeys().size() == 0
+          && before.diff(after).changedKeys().hasOnly(['playCount', 'updatedAt']);
     }
 
     function resolvedOwnerId(before, after, studioId) {
@@ -420,14 +649,31 @@ service cloud.firestore {
             'reason',
             'details',
             'createdAt',
-            'requiresFollowUp'
+            'requiresFollowUp',
+            'evidencePhotoURLs'
           ])
           && validUserReport(request.resource.data);
       allow read, update, delete: if false;
     }
 
+    match /mediaReports/{reportId} {
+      allow create: if isSignedIn()
+          && request.resource.data.keys().hasOnly([
+            'mediaId',
+            'ownerId',
+            'reporterUserId',
+            'reason',
+            'details',
+            'createdAt',
+            'requiresFollowUp',
+            'evidencePhotoURLs'
+          ])
+          && validMediaReport(request.resource.data);
+      allow read, update, delete: if false;
+    }
+
     match /users/{userId} {
-      allow read: if request.auth != null;
+      allow read: if true;
       allow write: if request.auth != null && request.auth.uid == userId;
 
       match /followers/{followerId} {
@@ -448,8 +694,8 @@ service cloud.firestore {
             && request.auth.uid == userId
             && request.resource.data.keys().hasOnly(['createdAt', 'followerId', 'followedId'])
             && request.resource.data.followerId == request.auth.uid
-            && request.resource.data.followedId == followedId
-            && request.resource.data.createdAt == request.time;
+          && request.resource.data.followedId == followedId
+          && request.resource.data.createdAt == request.time;
         allow delete: if isSignedIn() && request.auth.uid == userId;
         allow update: if false;
       }
@@ -460,9 +706,10 @@ service cloud.firestore {
       }
 
       match /media/{mediaId} {
-        allow get: if true;
-        allow list: if true;
-        allow create, update: if isSignedIn() && request.auth.uid == userId;
+        allow read: if true;
+        allow create: if isSignedIn() && request.auth.uid == userId;
+        allow update: if (isSignedIn() && request.auth.uid == userId)
+            || isPlayCountIncrement(resource.data, request.resource.data);
         allow delete: if isSignedIn() && request.auth.uid == userId;
       }
 
@@ -474,6 +721,75 @@ service cloud.firestore {
         allow delete: if isSignedIn() && request.auth.uid == ratingId;
       }
 
+      match /media/{mediaId}/radioLikes/{likeId} {
+        allow read, list: if false;
+        allow create, update: if isSignedIn()
+            && request.resource.data.userId == request.auth.uid
+            && request.resource.data.keys().hasOnly(['userId', 'createdAt', 'updatedAt'])
+            && request.resource.data.createdAt is timestamp
+            && request.resource.data.updatedAt is timestamp;
+        allow delete: if isSignedIn()
+            && ((resource != null && resource.data.userId == request.auth.uid) || request.auth.uid == likeId);
+      }
+
+      match /beatCatalog/{beatId} {
+        allow read: if true;
+        allow create, update: if isSignedIn()
+            && request.auth.uid == userId
+            && validBeatDoc(request.resource.data)
+            && (!hasField(request.resource.data, 'producerId') || request.resource.data.producerId == userId);
+        allow delete: if isSignedIn() && request.auth.uid == userId;
+
+        match /downloadRequests/{requestId} {
+          allow read: if isSignedIn()
+              && (request.auth.uid == userId
+                  || (resource != null && resource.data.requesterId == request.auth.uid));
+          allow create: if isSignedIn()
+              && request.resource.data.id == requestId
+              && request.resource.data.beatId == beatId
+              && request.resource.data.producerId == userId
+              && request.resource.data.requesterId == request.auth.uid
+              && request.resource.data.status == 'pending'
+              && validBeatDownloadRequestDoc(request.resource.data);
+          allow update: if isSignedIn()
+              && request.auth.uid == userId
+              && resource != null
+              && validBeatDownloadRequestDoc(request.resource.data)
+              && beatDownloadStatusUpdateAllowed(resource.data, request.resource.data);
+          allow delete: if isSignedIn() && request.auth.uid == userId;
+        }
+      }
+
+      match /beatDownloadRequests/{requestId} {
+        allow read: if isSignedIn()
+            && (request.auth.uid == userId
+                || (resource != null && resource.data.requesterId == request.auth.uid));
+        allow create: if isSignedIn()
+            && request.resource.data.id == requestId
+            && request.resource.data.producerId == userId
+            && request.resource.data.requesterId == request.auth.uid
+            && request.resource.data.status == 'pending'
+            && validBeatDownloadRequestDoc(request.resource.data);
+        allow update: if isSignedIn()
+            && request.auth.uid == userId
+            && resource != null
+            && validBeatDownloadRequestDoc(request.resource.data)
+            && beatDownloadStatusUpdateAllowed(resource.data, request.resource.data);
+        allow delete: if isSignedIn() && request.auth.uid == userId;
+      }
+
+      match /driveDownloadRequests/{requestId} {
+        allow read: if isSignedIn() && request.auth.uid == userId;
+        allow create: if isSignedIn()
+            && request.auth.uid == userId
+            && request.resource.data.id == requestId
+            && request.resource.data.requesterId == request.auth.uid
+            && request.resource.data.status == 'pending'
+            && validBeatDownloadRequestDoc(request.resource.data);
+        allow update: if false;
+        allow delete: if isSignedIn() && request.auth.uid == userId;
+      }
+
       match /alerts/{alertId} {
         allow read: if isSignedIn() && request.auth.uid == userId;
         allow create: if isSignedIn()
@@ -481,7 +797,57 @@ service cloud.firestore {
             && validAlertPayload(request.resource.data);
         allow update: if isSignedIn()
             && request.auth.uid == userId
-            && (validAlertPayload(request.resource.data) || validAlertStatusPatch(request.resource.data));
+            && (validAlertPayload(request.resource.data) || validAlertStatusPatch());
+        allow delete: if isSignedIn() && request.auth.uid == userId;
+      }
+    }
+
+    match /beatDownloadRequests/{requestId} {
+      allow read: if isSignedIn()
+          && resource != null
+          && (resource.data.requesterId == request.auth.uid || resource.data.producerId == request.auth.uid);
+      allow create: if isSignedIn()
+          && request.resource.data.id == requestId
+          && request.resource.data.requesterId == request.auth.uid
+          && request.resource.data.status == 'pending'
+          && validBeatDownloadRequestDoc(request.resource.data);
+      allow update: if resource != null
+          && isSignedIn()
+          && resource.data.producerId == request.auth.uid
+          && validBeatDownloadRequestDoc(request.resource.data)
+          && beatDownloadStatusUpdateAllowed(resource.data, request.resource.data);
+      allow delete: if false;
+    }
+
+    match /radioQueue/{trackId} {
+      allow read: if true;
+      allow create, update: if isSignedIn()
+          && request.resource.data.keys().hasOnly(['ownerId', 'mediaId', 'createdAt', 'updatedAt', 'primaryGenre', 'originState'])
+          && request.resource.data.ownerId is string
+          && request.resource.data.mediaId is string
+          && (!hasField(request.resource.data, 'primaryGenre') || request.resource.data.primaryGenre is string)
+          && (!hasField(request.resource.data, 'originState') || request.resource.data.originState is string)
+          && request.resource.data.ownerId == request.auth.uid
+          && request.resource.data.createdAt is timestamp
+          && request.resource.data.updatedAt is timestamp;
+      allow delete: if isSignedIn()
+          && resource != null
+          && resource.data.ownerId == request.auth.uid;
+    }
+
+    match /userRadioLikes/{userId} {
+      allow read: if isSignedIn() && request.auth.uid == userId;
+      allow write: if false;
+
+      match /likes/{likeId} {
+        allow read: if isSignedIn() && request.auth.uid == userId;
+        allow create, update: if isSignedIn()
+            && request.auth.uid == userId
+            && request.resource.data.keys().hasOnly(['ownerId', 'mediaId', 'createdAt', 'updatedAt'])
+            && request.resource.data.ownerId is string
+            && request.resource.data.mediaId is string
+            && request.resource.data.createdAt is timestamp
+            && request.resource.data.updatedAt is timestamp;
         allow delete: if isSignedIn() && request.auth.uid == userId;
       }
     }

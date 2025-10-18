@@ -1,0 +1,807 @@
+// firestore.rules
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(ownerId) {
+      return isSignedIn() && request.auth.uid == ownerId;
+    }
+
+    function participantIds(data) {
+      return data.participantIds is list
+          ? data.participantIds
+          : data.participants is list
+              ? data.participants.map(participant, participant.id)
+              : data.participants is map
+                  ? data.participants.keys()
+                  : [];
+    }
+
+    function senderId(data) {
+      return data.senderId != null
+          ? data.senderId
+          : data.sender is map && data.sender.id is string
+              ? data.sender.id
+              : null;
+    }
+
+    function isConversationParticipant(data) {
+      return isSignedIn()
+          && data != null
+          && participantIds(data).hasAny([request.auth.uid]);
+    }
+
+    function isConversationCreator(data) {
+      return isSignedIn() && data.creatorId == request.auth.uid;
+    }
+
+    function allowsParticipantEditing(data) {
+      return data.groupSettings != null && data.groupSettings.allowsParticipantEditing == true;
+    }
+
+    function validGroupSettings(settings) {
+      return settings == null || settings.allowsParticipantEditing == true || settings.allowsParticipantEditing == false;
+    }
+
+    function validParticipantCount(data) {
+      return (data.kind == 'direct' && participantIds(data).size() == 2)
+          || (data.kind == 'group' && participantIds(data).size() >= 2);
+    }
+
+    function validConversationBase(data) {
+      return data.kind in ['direct', 'group']
+          && validParticipantCount(data)
+          && validGroupSettings(data.groupSettings);
+    }
+
+    function validConversationCreate(data) {
+      return isSignedIn()
+          && data.participantIds is list
+          && validConversationBase(data)
+          && participantIds(data).hasAny([request.auth.uid]);
+    }
+
+    function groupSettingsChanged(before, after) {
+      return before.groupSettings != after.groupSettings;
+    }
+
+    function validConversationUpdate(before, after) {
+      return isSignedIn() && isConversationParticipant(before);
+    }
+
+    function getConversation(conversationId) {
+      return get(/databases/$(database)/documents/conversations/$(conversationId));
+    }
+
+    function canAccessConversation(conversationId) {
+      let conversation = getConversation(conversationId);
+      let conversationData = conversation.data;
+      return conversationData != null
+          && isConversationParticipant(conversationData);
+    }
+
+    function canCreateMessage(conversationId, data) {
+      let conversation = getConversation(conversationId);
+      let conversationData = conversation.data;
+      let resolvedSenderId = senderId(data);
+      return isSignedIn()
+          && conversationData != null
+          && isConversationParticipant(conversationData)
+          && (resolvedSenderId == null || resolvedSenderId == request.auth.uid);
+    }
+
+    function getStudio(studioId) {
+      return get(/databases/$(database)/documents/studios/$(studioId));
+    }
+
+    function isStudioOwnerById(studioId) {
+      let studio = getStudio(studioId);
+      return studio.data != null
+          && studio.data.ownerId is string
+          && studio.data.ownerId == request.auth.uid;
+    }
+
+    function isEngineerRequestOwner(resource, requestId) {
+      return isSignedIn() && (
+        requestId == request.auth.uid
+        || (resource != null && resource.data.engineerId == request.auth.uid)
+      );
+    }
+
+    function getBookingDoc(bookingId) {
+      return get(/databases/$(database)/documents/bookings/$(bookingId));
+    }
+
+    function resolveBookingData(data) {
+      return data != null ? data.data : null;
+    }
+
+    function reviewBookingData(reviewData) {
+      return hasField(reviewData, 'bookingId')
+          && reviewData.bookingId is string
+          ? resolveBookingData(getBookingDoc(reviewData.bookingId))
+          : null;
+    }
+
+    function reviewerIsArtist(booking) {
+      return booking.artistId == request.auth.uid;
+    }
+
+    function reviewerIsEngineer(booking) {
+      return booking.engineerId == request.auth.uid;
+    }
+
+    function reviewerIsStudioOwner(booking) {
+      return booking.studioId is string && isStudioOwnerById(booking.studioId);
+    }
+
+    function reviewRoleAllowed(data, booking) {
+      return (
+        data.revieweeKind == 'studio'
+          && booking.studioId is string
+          && data.revieweeId == booking.studioId
+          && reviewerIsArtist(booking)
+          && data.reviewerAccountType == 'artist'
+      ) || (
+        data.revieweeKind == 'engineer'
+          && booking.engineerId is string
+          && data.revieweeId == booking.engineerId
+          && reviewerIsArtist(booking)
+          && data.reviewerAccountType == 'artist'
+      ) || (
+        data.revieweeKind == 'artist'
+          && booking.artistId is string
+          && data.revieweeId == booking.artistId
+          && (
+            (reviewerIsEngineer(booking) && data.reviewerAccountType == 'engineer')
+            || (reviewerIsStudioOwner(booking) && data.reviewerAccountType == 'studioOwner')
+          )
+      );
+    }
+
+    function reviewBookingEligible(data) {
+      let booking = reviewBookingData(data);
+      return booking != null
+        && booking.status == 'completed'
+        && reviewRoleAllowed(data, booking);
+    }
+
+    function validReviewPayload(data) {
+      return hasField(data, 'bookingId') && data.bookingId is string
+          && hasField(data, 'reviewerId') && data.reviewerId is string
+          && hasField(data, 'revieweeId') && data.revieweeId is string
+          && hasField(data, 'revieweeKind') && data.revieweeKind is string
+          && hasField(data, 'reviewerAccountType') && data.reviewerAccountType is string
+          && hasField(data, 'rating') && data.rating is number
+          && hasField(data, 'comment') && data.comment is string
+          && hasField(data, 'createdAt') && data.createdAt is timestamp
+          && hasField(data, 'updatedAt') && data.updatedAt is timestamp
+          && data.revieweeKind in ['studio', 'engineer', 'artist', 'studioOwner']
+          && data.rating >= 1 && data.rating <= 5;
+    }
+
+    function canSubmitReview(data) {
+      return isSignedIn()
+        && validReviewPayload(data)
+        && data.reviewerId == request.auth.uid
+        && reviewBookingEligible(data);
+    }
+
+    function validUserReport(data) {
+      return data.reportedUserId is string
+          && data.reportedUserId.size() > 0
+          && data.reporterUserId is string
+          && data.reporterUserId == request.auth.uid
+          && data.reason in ['spam', 'inappropriateContent', 'harassment', 'fraud', 'impersonation', 'other']
+          && data.createdAt is timestamp
+          && (!hasField(data, 'details') || data.details is string)
+          && (!hasField(data, 'requiresFollowUp') || data.requiresFollowUp is bool)
+          && (!hasField(data, 'evidencePhotoURLs') || (data.evidencePhotoURLs is list && data.evidencePhotoURLs.size() <= 4));
+    }
+
+    function validMediaReport(data) {
+      return data.mediaId is string
+          && data.mediaId.size() > 0
+          && data.ownerId is string
+          && data.ownerId.size() > 0
+          && data.reporterUserId is string
+          && data.reporterUserId == request.auth.uid
+          && data.reason in ['spam', 'inappropriateContent', 'harassment', 'fraud', 'impersonation', 'other']
+          && data.createdAt is timestamp
+          && (!hasField(data, 'details') || data.details is string)
+          && (!hasField(data, 'requiresFollowUp') || data.requiresFollowUp is bool)
+          && (!hasField(data, 'evidencePhotoURLs') || (data.evidencePhotoURLs is list && data.evidencePhotoURLs.size() <= 4));
+    }
+
+    function validBeatLicense(license) {
+      return license in ['exclusive', 'nonExclusive', 'stemsIncluded', 'custom'];
+    }
+
+    function validBeatDoc(data) {
+      return data.keys().hasOnly([
+          'id',
+          'producerId',
+          'title',
+          'summary',
+          'license',
+          'priceCents',
+          'currencyCode',
+          'previewURL',
+          'artworkURL',
+          'bpm',
+          'musicalKey',
+          'durationSeconds',
+          'stemsIncluded',
+          'tags',
+          'isPublished',
+          'createdAt',
+          'updatedAt'
+        ])
+        && hasField(data, 'title') && data.title is string && data.title.size() > 0
+        && hasField(data, 'license') && validBeatLicense(data.license)
+        && hasField(data, 'priceCents') && data.priceCents is number && data.priceCents >= 0
+        && hasField(data, 'currencyCode') && data.currencyCode is string
+        && hasField(data, 'stemsIncluded') && data.stemsIncluded is bool
+        && hasField(data, 'isPublished') && data.isPublished is bool
+        && hasField(data, 'createdAt') && data.createdAt is timestamp
+        && hasField(data, 'updatedAt') && data.updatedAt is timestamp
+        && (!hasField(data, 'summary') || data.summary is string)
+        && (!hasField(data, 'previewURL') || data.previewURL is string)
+        && (!hasField(data, 'artworkURL') || data.artworkURL is string)
+        && (!hasField(data, 'bpm') || data.bpm is number)
+        && (!hasField(data, 'musicalKey') || data.musicalKey is string)
+        && (!hasField(data, 'durationSeconds') || data.durationSeconds is number)
+        && (!hasField(data, 'tags') || (
+          data.tags is list
+          && data.tags.size() <= 20
+          && data.tags.filter(tag, tag is string).size() == data.tags.size()
+        ));
+    }
+
+    function validBeatDownloadStatus(status) {
+      return status in ['pending', 'fulfilled', 'rejected'];
+    }
+
+    function validBeatDownloadRequestDoc(data) {
+      return data.keys().hasOnly([
+          'id',
+          'beatId',
+          'producerId',
+          'requesterId',
+          'status',
+          'createdAt',
+          'updatedAt'
+        ])
+        && hasField(data, 'beatId') && data.beatId is string
+        && hasField(data, 'producerId') && data.producerId is string
+        && hasField(data, 'requesterId') && data.requesterId is string
+        && hasField(data, 'status') && validBeatDownloadStatus(data.status)
+        && hasField(data, 'createdAt') && data.createdAt is timestamp
+        && hasField(data, 'updatedAt') && data.updatedAt is timestamp
+        && (!hasField(data, 'id') || data.id is string);
+    }
+
+    function beatDownloadStatusUpdateAllowed(before, after) {
+      return before != null
+          && after != null
+          && before.diff(after).addedKeys().size() == 0
+          && before.diff(after).removedKeys().size() == 0
+          && before.diff(after).changedKeys().hasOnly(['status', 'updatedAt'])
+          && before.beatId == after.beatId
+          && before.producerId == after.producerId
+          && before.requesterId == after.requesterId
+          && before.createdAt == after.createdAt
+          && (!hasField(before, 'id') || before.id == after.id)
+          && validBeatDownloadStatus(after.status)
+          && (before.status == after.status || (before.status == 'pending' && after.status in ['fulfilled', 'rejected']));
+    }
+
+    function isEngineerRequestForCurrentOwner(data) {
+      return data != null
+          && hasField(data, 'studioOwnerId')
+          && data.studioOwnerId is string
+          && data.studioOwnerId == request.auth.uid;
+    }
+
+    function hasField(data, fieldName) {
+      return data.keys().hasAny([fieldName]);
+    }
+
+    function validAlertPayload(data) {
+      return hasField(data, 'title') && data.title is string
+        && hasField(data, 'message') && data.message is string
+        && hasField(data, 'category') && data.category is string
+        && hasField(data, 'createdAt') && data.createdAt is timestamp
+        && hasField(data, 'isRead') && data.isRead is bool
+        && (!hasField(data, 'deeplink') || data.deeplink is string)
+        && (!hasField(data, 'readAt') || data.readAt is timestamp)
+        && data.keys().hasOnly(['title', 'message', 'category', 'createdAt', 'isRead', 'deeplink', 'readAt']);
+    }
+
+    function validAlertStatusPatch() {
+      return request.writeFields.hasOnly(['isRead', 'readAt'])
+        && (!request.writeFields.hasAny(['isRead']) || request.resource.data.isRead is bool)
+        && (!request.writeFields.hasAny(['readAt']) || request.resource.data.readAt is timestamp);
+    }
+
+    function validMediaRatingDoc(data) {
+      return data.keys().hasOnly(['rating', 'createdAt', 'updatedAt'])
+        && hasField(data, 'rating') && data.rating is number
+        && data.rating >= 1 && data.rating <= 5
+        && hasField(data, 'createdAt') && data.createdAt is timestamp
+        && hasField(data, 'updatedAt') && data.updatedAt is timestamp;
+    }
+
+    function isPlayCountIncrement(before, after) {
+      return isSignedIn()
+          && before != null
+          && after != null
+          && after.keys().hasOnly(before.keys())
+          && before.keys().hasOnly(after.keys())
+          && hasField(before, 'playCount') && before.playCount is number
+          && hasField(after, 'playCount') && after.playCount is number
+          && hasField(after, 'updatedAt') && after.updatedAt is timestamp
+          && after.playCount == before.playCount + 1
+          && after.updatedAt == request.time
+          && before.diff(after).addedKeys().size() == 0
+          && before.diff(after).removedKeys().size() == 0
+          && before.diff(after).changedKeys().hasOnly(['playCount', 'updatedAt']);
+    }
+
+    function resolvedOwnerId(before, after, studioId) {
+      return hasField(after, 'studioOwnerId')
+          ? after.studioOwnerId
+          : hasField(before, 'studioOwnerId')
+              ? before.studioOwnerId
+              : getStudio(studioId).data.ownerId;
+    }
+
+    function validEngineerRequestStatus(status) {
+      return status in ['pending', 'accepted', 'denied'];
+    }
+
+    function validEngineerRequestCreate(data, studioId) {
+      return data.keys().hasOnly(['engineerId', 'studioOwnerId', 'status', 'createdAt', 'updatedAt'])
+          && data.engineerId is string
+          && data.engineerId == request.auth.uid
+          && data.studioOwnerId is string
+          && data.studioOwnerId == getStudio(studioId).data.ownerId
+          && data.status == 'pending'
+          && data.createdAt is timestamp
+          && data.updatedAt is timestamp;
+    }
+
+    function validEngineerRequestOwnerUpdate(before, after) {
+      return before != null
+          && before.engineerId == after.engineerId
+          && before.createdAt == after.createdAt
+          && hasField(after, 'status') && validEngineerRequestStatus(after.status)
+          && hasField(after, 'updatedAt') && after.updatedAt is timestamp;
+    }
+
+    function validEngineerRequestEngineerUpdate(before, after, studioId) {
+      let studio = getStudio(studioId);
+      return resolvedOwnerId(before, after, studioId) == studio.data.ownerId
+          && before.engineerId == after.engineerId
+          && before.engineerId == request.auth.uid
+          && before.createdAt == after.createdAt
+          && hasField(after, 'status') && after.status == 'pending'
+          && before.status in ['pending', 'denied']
+          && hasField(after, 'updatedAt') && after.updatedAt is timestamp;
+    }
+
+    function validBookingStatus(status) {
+      return status in ['pending', 'confirmed', 'completed', 'cancelled', 'rescheduled'];
+    }
+
+    function immutableBookingIds(before, after) {
+      return before.artistId == after.artistId
+          && before.studioId == after.studioId
+          && before.engineerId == after.engineerId;
+    }
+
+    function isBookingParticipantData(data) {
+      return data != null && (
+        data.artistId == request.auth.uid
+        || data.engineerId == request.auth.uid
+        || (data.studioId is string && isStudioOwnerById(data.studioId))
+      );
+    }
+
+    function validApprovalMap(approval) {
+      return approval == null
+        || (
+          approval.requiresStudioApproval is bool
+          && approval.requiresEngineerApproval is bool
+          && (!hasField(approval, 'resolvedBy') || approval.resolvedBy == null || approval.resolvedBy is string)
+          && (!hasField(approval, 'resolvedAt') || approval.resolvedAt == null || approval.resolvedAt is timestamp)
+        );
+    }
+
+    function validBookingCreate(data) {
+      return isSignedIn()
+        && data.artistId is string && data.artistId == request.auth.uid
+        && data.studioId is string
+        && data.roomId is string
+        && data.engineerId is string
+        && validBookingStatus(data.status)
+        && data.requestedStart is timestamp
+        && data.requestedEnd is timestamp
+        && data.durationMinutes is number
+        && data.instantBook is bool
+        && validApprovalMap(data.approval)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function validBookingArtistUpdate(before, after) {
+      return before.artistId == request.auth.uid
+        && immutableBookingIds(before, after)
+        && before.status == 'pending'
+        && after.status == 'pending'
+        && after.instantBook == before.instantBook
+        && validApprovalMap(after.approval)
+        && after.updatedAt is timestamp
+        && after.requestedStart is timestamp
+        && after.requestedEnd is timestamp
+        && after.durationMinutes is number;
+    }
+
+    function timeUnchanged(before, after) {
+      return after.requestedStart == before.requestedStart
+          && after.requestedEnd == before.requestedEnd
+          && after.durationMinutes == before.durationMinutes;
+    }
+
+    function approvalsCleared(approval) {
+      return approval.requiresEngineerApproval == false
+          && approval.requiresStudioApproval == false;
+    }
+
+    function validBookingArtistCancel(before, after) {
+      return before.artistId == request.auth.uid
+        && immutableBookingIds(before, after)
+        && before.status in ['pending', 'confirmed', 'rescheduled']
+        && after.status == 'cancelled'
+        && timeUnchanged(before, after)
+        && approvalsCleared(after.approval)
+        && after.confirmedStart == null
+        && after.confirmedEnd == null
+        && after.updatedAt is timestamp;
+    }
+
+    function validBookingArtistReschedule(before, after) {
+      return before.artistId == request.auth.uid
+        && immutableBookingIds(before, after)
+        && before.status in ['pending', 'confirmed', 'rescheduled']
+        && after.status == 'pending'
+        && after.requestedStart is timestamp
+        && after.requestedEnd is timestamp
+        && after.durationMinutes is number
+        && (after.requestedStart != before.requestedStart
+            || after.requestedEnd != before.requestedEnd
+            || after.durationMinutes != before.durationMinutes)
+        && after.confirmedStart == null
+        && after.confirmedEnd == null
+        && after.approval.requiresEngineerApproval == true
+        && after.approval.requiresStudioApproval == before.approval.requiresStudioApproval
+        && (!hasField(after.approval, 'resolvedBy') || after.approval.resolvedBy == null)
+        && (!hasField(after.approval, 'resolvedAt') || after.approval.resolvedAt == null)
+        && after.updatedAt is timestamp;
+    }
+
+    function validBookingManagerUpdate(before, after) {
+      return immutableBookingIds(before, after)
+        && validBookingStatus(after.status)
+        && validApprovalMap(after.approval)
+        && after.updatedAt is timestamp
+        && (
+          (timeUnchanged(before, after))
+          || validBookingManagerReschedule(before, after)
+          || validBookingManagerCancel(before, after)
+        );
+    }
+
+    function validBookingManagerReschedule(before, after) {
+      return after.status == 'pending'
+        && after.requestedStart is timestamp
+        && after.requestedEnd is timestamp
+        && after.durationMinutes is number
+        && (after.requestedStart != before.requestedStart
+            || after.requestedEnd != before.requestedEnd
+            || after.durationMinutes != before.durationMinutes)
+        && after.confirmedStart == null
+        && after.confirmedEnd == null
+        && (after.approval.requiresEngineerApproval == true || after.approval.requiresStudioApproval == true);
+    }
+
+    function validBookingManagerCancel(before, after) {
+      return after.status == 'cancelled'
+        && timeUnchanged(before, after)
+        && approvalsCleared(after.approval)
+        && after.confirmedStart == null
+        && after.confirmedEnd == null;
+    }
+
+    match /userReports/{reportId} {
+      allow create: if isSignedIn()
+          && request.resource.data.keys().hasOnly([
+            'reportedUserId',
+            'reporterUserId',
+            'reason',
+            'details',
+            'createdAt',
+            'requiresFollowUp',
+            'evidencePhotoURLs'
+          ])
+          && validUserReport(request.resource.data);
+      allow read, update, delete: if false;
+    }
+
+    match /mediaReports/{reportId} {
+      allow create: if isSignedIn()
+          && request.resource.data.keys().hasOnly([
+            'mediaId',
+            'ownerId',
+            'reporterUserId',
+            'reason',
+            'details',
+            'createdAt',
+            'requiresFollowUp',
+            'evidencePhotoURLs'
+          ])
+          && validMediaReport(request.resource.data);
+      allow read, update, delete: if false;
+    }
+
+    match /users/{userId} {
+      allow read: if true;
+      allow write: if request.auth != null && request.auth.uid == userId;
+
+      match /followers/{followerId} {
+        allow read: if isSignedIn();
+        allow create: if isSignedIn()
+            && request.auth.uid == followerId
+            && request.resource.data.keys().hasOnly(['createdAt', 'followerId', 'followedId'])
+            && request.resource.data.followerId == request.auth.uid
+            && request.resource.data.followedId == userId
+            && request.resource.data.createdAt == request.time;
+        allow delete: if isSignedIn() && (request.auth.uid == followerId || request.auth.uid == userId);
+        allow update: if false;
+      }
+
+      match /following/{followedId} {
+        allow read: if isSignedIn();
+        allow create: if isSignedIn()
+            && request.auth.uid == userId
+            && request.resource.data.keys().hasOnly(['createdAt', 'followerId', 'followedId'])
+            && request.resource.data.followerId == request.auth.uid
+          && request.resource.data.followedId == followedId
+          && request.resource.data.createdAt == request.time;
+        allow delete: if isSignedIn() && request.auth.uid == userId;
+        allow update: if false;
+      }
+
+      match /availability/{entryId} {
+        allow read: if request.auth != null;
+        allow create, update, delete: if request.auth != null && request.auth.uid == userId;
+      }
+
+      match /media/{mediaId} {
+        allow read: if true;
+        allow create: if isSignedIn() && request.auth.uid == userId;
+        allow update: if (isSignedIn() && request.auth.uid == userId)
+            || isPlayCountIncrement(resource.data, request.resource.data);
+        allow delete: if isSignedIn() && request.auth.uid == userId;
+      }
+
+      match /media/{mediaId}/ratings/{ratingId} {
+        allow read: if isSignedIn();
+        allow create, update: if isSignedIn()
+            && request.auth.uid == ratingId
+            && validMediaRatingDoc(request.resource.data);
+        allow delete: if isSignedIn() && request.auth.uid == ratingId;
+      }
+
+      match /media/{mediaId}/radioLikes/{likeId} {
+        allow read, list: if false;
+        allow create, update: if isSignedIn()
+            && request.resource.data.userId == request.auth.uid
+            && request.resource.data.keys().hasOnly(['userId', 'createdAt', 'updatedAt'])
+            && request.resource.data.createdAt is timestamp
+            && request.resource.data.updatedAt is timestamp;
+        allow delete: if isSignedIn()
+            && ((resource != null && resource.data.userId == request.auth.uid) || request.auth.uid == likeId);
+      }
+
+      match /beatCatalog/{beatId} {
+        allow read: if true;
+        allow create, update: if isSignedIn()
+            && request.auth.uid == userId
+            && validBeatDoc(request.resource.data)
+            && (!hasField(request.resource.data, 'producerId') || request.resource.data.producerId == userId);
+        allow delete: if isSignedIn() && request.auth.uid == userId;
+
+        match /downloadRequests/{requestId} {
+          allow read: if isSignedIn()
+              && (request.auth.uid == userId
+                  || (resource != null && resource.data.requesterId == request.auth.uid));
+          allow create: if isSignedIn()
+              && request.resource.data.id == requestId
+              && request.resource.data.beatId == beatId
+              && request.resource.data.producerId == userId
+              && request.resource.data.requesterId == request.auth.uid
+              && request.resource.data.status == 'pending'
+              && validBeatDownloadRequestDoc(request.resource.data);
+          allow update: if isSignedIn()
+              && request.auth.uid == userId
+              && resource != null
+              && validBeatDownloadRequestDoc(request.resource.data)
+              && beatDownloadStatusUpdateAllowed(resource.data, request.resource.data);
+          allow delete: if isSignedIn() && request.auth.uid == userId;
+        }
+      }
+
+      match /beatDownloadRequests/{requestId} {
+        allow read: if isSignedIn()
+            && (request.auth.uid == userId
+                || (resource != null && resource.data.requesterId == request.auth.uid));
+        allow create: if isSignedIn()
+            && request.resource.data.id == requestId
+            && request.resource.data.producerId == userId
+            && request.resource.data.requesterId == request.auth.uid
+            && request.resource.data.status == 'pending'
+            && validBeatDownloadRequestDoc(request.resource.data);
+        allow update: if isSignedIn()
+            && request.auth.uid == userId
+            && resource != null
+            && validBeatDownloadRequestDoc(request.resource.data)
+            && beatDownloadStatusUpdateAllowed(resource.data, request.resource.data);
+        allow delete: if isSignedIn() && request.auth.uid == userId;
+      }
+
+      match /driveDownloadRequests/{requestId} {
+        allow read: if isSignedIn() && request.auth.uid == userId;
+        allow create: if isSignedIn()
+            && request.auth.uid == userId
+            && request.resource.data.id == requestId
+            && request.resource.data.requesterId == request.auth.uid
+            && request.resource.data.status == 'pending'
+            && validBeatDownloadRequestDoc(request.resource.data);
+        allow update: if false;
+        allow delete: if false;
+      }
+
+      match /alerts/{alertId} {
+        allow read: if isSignedIn() && request.auth.uid == userId;
+        allow create: if isSignedIn()
+            && request.auth.uid == userId
+            && validAlertPayload(request.resource.data);
+        allow update: if isSignedIn()
+            && request.auth.uid == userId
+            && (validAlertPayload(request.resource.data) || validAlertStatusPatch());
+        allow delete: if isSignedIn() && request.auth.uid == userId;
+      }
+    }
+
+    match /beatDownloadRequests/{requestId} {
+      allow read: if isSignedIn()
+          && resource != null
+          && (resource.data.requesterId == request.auth.uid || resource.data.producerId == request.auth.uid);
+      allow create: if isSignedIn()
+          && request.resource.data.id == requestId
+          && request.resource.data.requesterId == request.auth.uid
+          && request.resource.data.status == 'pending'
+          && validBeatDownloadRequestDoc(request.resource.data);
+      allow update: if resource != null
+          && isSignedIn()
+          && resource.data.producerId == request.auth.uid
+          && validBeatDownloadRequestDoc(request.resource.data)
+          && beatDownloadStatusUpdateAllowed(resource.data, request.resource.data);
+      allow delete: if false;
+    }
+
+    match /radioQueue/{trackId} {
+      allow read: if true;
+      allow create, update: if isSignedIn()
+          && request.resource.data.keys().hasOnly(['ownerId', 'mediaId', 'createdAt', 'updatedAt', 'primaryGenre', 'originState'])
+          && request.resource.data.ownerId is string
+          && request.resource.data.mediaId is string
+          && (!hasField(request.resource.data, 'primaryGenre') || request.resource.data.primaryGenre is string)
+          && (!hasField(request.resource.data, 'originState') || request.resource.data.originState is string)
+          && request.resource.data.ownerId == request.auth.uid
+          && request.resource.data.createdAt is timestamp
+          && request.resource.data.updatedAt is timestamp;
+      allow delete: if isSignedIn()
+          && resource != null
+          && resource.data.ownerId == request.auth.uid;
+    }
+
+    match /userRadioLikes/{userId} {
+      allow read: if isSignedIn() && request.auth.uid == userId;
+      allow write: if false;
+
+      match /likes/{likeId} {
+        allow read: if isSignedIn() && request.auth.uid == userId;
+        allow create, update: if isSignedIn()
+            && request.auth.uid == userId
+            && request.resource.data.keys().hasOnly(['ownerId', 'mediaId', 'createdAt', 'updatedAt'])
+            && request.resource.data.ownerId is string
+            && request.resource.data.mediaId is string
+            && request.resource.data.createdAt is timestamp
+            && request.resource.data.updatedAt is timestamp;
+        allow delete: if isSignedIn() && request.auth.uid == userId;
+      }
+    }
+
+    match /studios/{studioId} {
+      allow read: if true;
+      allow create: if isSignedIn() && request.resource.data.ownerId == request.auth.uid;
+      allow update, delete: if resource != null && isOwner(resource.data.ownerId);
+
+      match /engineerRequests/{requestId} {
+        allow list: if isSignedIn();
+        allow read: if isStudioOwnerById(studioId)
+            || (resource != null && isEngineerRequestForCurrentOwner(resource.data))
+            || isEngineerRequestOwner(resource, requestId);
+        allow create: if isSignedIn()
+            && requestId == request.auth.uid
+            && validEngineerRequestCreate(request.resource.data, studioId);
+        allow update: if (isEngineerRequestForCurrentOwner(resource.data) && validEngineerRequestOwnerUpdate(resource.data, request.resource.data))
+            || (isStudioOwnerById(studioId) && validEngineerRequestOwnerUpdate(resource.data, request.resource.data))
+            || (isEngineerRequestOwner(resource, requestId) && validEngineerRequestEngineerUpdate(resource.data, request.resource.data, studioId));
+        allow delete: if isStudioOwnerById(studioId)
+            || isEngineerRequestOwner(resource, requestId);
+      }
+
+      match /rooms/{roomId} {
+        allow read: if true;
+        allow create, update, delete: if isStudioOwnerById(studioId);
+      }
+
+      match /availability/{entryId} {
+        allow read: if isSignedIn();
+        allow create, update, delete: if isStudioOwnerById(studioId);
+      }
+    }
+
+    match /bookings/{bookingId} {
+      allow list: if isSignedIn();
+      allow read: if resource != null && isBookingParticipantData(resource.data);
+      allow create: if validBookingCreate(request.resource.data);
+      allow update: if resource != null && (
+          (resource.data.artistId == request.auth.uid && (
+              validBookingArtistUpdate(resource.data, request.resource.data)
+              || validBookingArtistCancel(resource.data, request.resource.data)
+              || validBookingArtistReschedule(resource.data, request.resource.data)
+            ))
+          || (isStudioOwnerById(resource.data.studioId) && validBookingManagerUpdate(resource.data, request.resource.data))
+          || (resource.data.engineerId == request.auth.uid && validBookingManagerUpdate(resource.data, request.resource.data))
+        );
+      allow delete: if resource != null && resource.data.artistId == request.auth.uid && resource.data.status == 'pending';
+    }
+
+    match /conversations/{conversationId} {
+      allow list: if isSignedIn();
+      allow read: if resource != null && isConversationParticipant(resource.data);
+      allow create: if validConversationCreate(request.resource.data);
+      allow update: if resource != null && validConversationUpdate(resource.data, request.resource.data);
+      allow delete: if resource != null && isConversationCreator(resource.data);
+
+      match /messages/{messageId} {
+        allow list: if isSignedIn();
+        allow read: if canAccessConversation(conversationId);
+        allow create: if canCreateMessage(conversationId, request.resource.data);
+        allow update, delete: if false;
+      }
+    }
+
+    match /reviews/{reviewId} {
+      allow read: if isSignedIn();
+      allow create: if canSubmitReview(request.resource.data);
+    }
+  }
+}

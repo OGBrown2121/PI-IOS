@@ -30,6 +30,7 @@ struct ThreadsView: View {
                                 viewModel: ChatDetailViewModel(
                                     thread: thread,
                                     chatService: di.chatService,
+                                    storageService: di.storageService,
                                     appState: appState
                                 ) { updatedThread in
                                     viewModel.handleThreadUpdate(updatedThread)
@@ -98,6 +99,7 @@ struct ThreadsView: View {
                     viewModel: ChatDetailViewModel(
                         thread: thread,
                         chatService: di.chatService,
+                        storageService: di.storageService,
                         appState: appState
                     ) { updatedThread in
                         viewModel.handleThreadUpdate(updatedThread)

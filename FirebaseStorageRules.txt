@@ -10,7 +10,12 @@ service firebase.storage {
     }
 
     function isStudioOwner(studioId) {
-      return isSignedIn() && studioDocument(studioId).data.ownerId == request.auth.uid;
+      let studio = studioDocument(studioId);
+      return isSignedIn()
+        && studio != null
+        && studio.data != null
+        && studio.data.ownerId != null
+        && studio.data.ownerId == request.auth.uid;
     }
 
     function isValidStudioAsset(fileName) {
@@ -59,6 +64,48 @@ service firebase.storage {
         && request.resource.contentType.matches('image/.+');
     }
 
+    function canAccessProjectFile(conversationId) {
+      let conversation = conversationDocument(conversationId);
+      return isConversationParticipant(conversation);
+    }
+
+    function canUploadProjectFile(conversationId) {
+      let conversation = conversationDocument(conversationId);
+      return isConversationParticipant(conversation)
+        && request.resource != null
+        && request.resource.size < 200 * 1024 * 1024;
+    }
+
+    function isBeatOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function beatDocument(userId, beatId) {
+      return firestore.get(/databases/(default)/documents/users/$(userId)/beatCatalog/$(beatId));
+    }
+
+    function isBeatFreeDownloadEnabled(userId, beatId) {
+      let beat = beatDocument(userId, beatId);
+      return beat != null
+        && beat.data != null
+        && (
+          (beat.data.priceCents is number && beat.data.priceCents == 0)
+          || beat.data.allowFreeDownload == true
+        );
+    }
+
+    function isBeatPreviewFile(fileName) {
+      return fileName.matches('preview[^/]*');
+    }
+
+    function isBeatArtworkFile(fileName) {
+      return fileName.matches('artwork[^/]*');
+    }
+
+    function isBeatStemsFile(fileName) {
+      return fileName.matches('stems[^/]*');
+    }
+
     match /users/{userId}/studios/{studioId}/{fileName} {
       // Everyone can view studio media that already exists.
       allow read: if resource != null;
@@ -99,10 +146,60 @@ service firebase.storage {
       allow delete: if isProfileOwner(userId);
     }
 
+    match /beats/{userId}/{beatId}/{fileName} {
+      allow read: if resource != null
+        && (
+          isBeatOwner(userId)
+          || isBeatPreviewFile(fileName)
+          || isBeatFreeDownloadEnabled(userId, beatId)
+        );
+      allow create, update: if isBeatOwner(userId)
+        && request.resource != null
+        && (
+          (
+            isBeatPreviewFile(fileName)
+            && request.resource.size < 150 * 1024 * 1024
+            && (
+              request.resource.contentType.matches('audio/.+')
+              || request.resource.contentType == 'application/octet-stream'
+            )
+          )
+          || (
+            isBeatArtworkFile(fileName)
+            && request.resource.size < 8 * 1024 * 1024
+            && request.resource.contentType.matches('image/.+')
+          )
+          || (
+            isBeatStemsFile(fileName)
+            && request.resource.size < 400 * 1024 * 1024
+            && (
+              request.resource.contentType.matches('application/(x-)?zip(.+)?')
+              || request.resource.contentType == 'application/octet-stream'
+            )
+          )
+        );
+      allow delete: if isBeatOwner(userId);
+    }
+
     match /chat-media/{conversationId}/{messageId}/{fileName} {
       allow read, delete: if resource != null && canAccessChatMedia(conversationId);
       allow create: if canUploadChatMedia(conversationId);
       allow update: if false;
+    }
+
+    match /project-files/{conversationId}/{fileId}/{fileName} {
+      allow read, delete: if resource != null && canAccessProjectFile(conversationId);
+      allow create: if canUploadProjectFile(conversationId);
+      allow update: if false;
+    }
+
+    match /user-reports/{reporterId}/{reportId}/evidence/{fileName} {
+      allow read, delete: if isSignedIn() && request.auth.uid == reporterId;
+      allow create, update: if isSignedIn()
+        && request.auth.uid == reporterId
+        && request.resource != null
+        && request.resource.size < 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/.+');
     }
 
     // Deny everything else by default.

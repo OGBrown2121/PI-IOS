@@ -14,6 +14,7 @@ final class BookingInboxViewModel: ObservableObject {
         case list
         case calendar
         case schedule
+        case openTimes
 
         var id: String { rawValue }
 
@@ -25,6 +26,8 @@ final class BookingInboxViewModel: ObservableObject {
                 return "Calendar"
             case .schedule:
                 return "Schedule"
+            case .openTimes:
+                return "Open Times"
             }
         }
     }
@@ -41,6 +44,8 @@ final class BookingInboxViewModel: ObservableObject {
             let normalized = calendar.startOfDay(for: selectedCalendarDate)
             if selectedCalendarDate != normalized {
                 selectedCalendarDate = normalized
+            } else {
+                openTimesEngine?.updateSelectedDate(normalized)
             }
         }
     }
@@ -55,6 +60,10 @@ final class BookingInboxViewModel: ObservableObject {
     @Published private var roomNames: [String: String] = [:]
     @Published private var userProfiles: [String: UserProfile] = [:]
     @Published private(set) var engineerProfiles: [String: UserProfile] = [:]
+    @Published private(set) var openTimesSections: [OpenTimesSection] = []
+    @Published private(set) var isLoadingOpenTimes = false
+    @Published private(set) var openTimesMessage: String?
+    @Published private(set) var openTimesError: String?
 
     private let bookingService: any BookingService
     private let firestore: any FirestoreService
@@ -68,6 +77,7 @@ final class BookingInboxViewModel: ObservableObject {
     private var cachedBookings: [Booking] = []
     private var dismissedReviewTaskIds: Set<String>
     private static let dismissedReviewStorageKey = "booking_review_dismissed_ids"
+    private var openTimesEngine: OpenTimesEngine?
 
     init(
         bookingService: any BookingService,
@@ -86,6 +96,14 @@ final class BookingInboxViewModel: ObservableObject {
             dismissedReviewTaskIds = Set(stored)
         } else {
             dismissedReviewTaskIds = []
+        }
+    }
+
+    deinit {
+        if let engine = openTimesEngine {
+            Task { @MainActor in
+                engine.stop()
+            }
         }
     }
 
@@ -138,14 +156,21 @@ final class BookingInboxViewModel: ObservableObject {
         viewerRole = role(for: user.accountType)
         errorMessage = nil
 
+        if viewerRole != .engineer && displayMode == .openTimes {
+            displayMode = .list
+        }
+
         switch viewerRole {
         case .engineer:
             await loadEngineerBookings(for: user)
         case .artist:
+            resetOpenTimes()
             await loadArtistBookings(for: user)
         case .studioOwner:
+            resetOpenTimes()
             await loadStudioBookings(for: user)
         case .unsupported, .unknown:
+            resetOpenTimes()
             pendingApprovals = []
             scheduledBookings = []
             calendarBookings = []
@@ -434,6 +459,7 @@ final class BookingInboxViewModel: ObservableObject {
             pastBookings = historical
             await rebuildPendingReviews(with: sorted, for: user, role: .engineer)
             errorMessage = nil
+            ensureOpenTimesEngine(for: user)
         } catch {
             errorMessage = error.localizedDescription
             pendingApprovals = []
@@ -441,7 +467,46 @@ final class BookingInboxViewModel: ObservableObject {
             pastBookings = []
             pendingReviews = []
             cachedBookings = []
+            resetOpenTimes()
+            openTimesError = error.localizedDescription
+            isLoadingOpenTimes = false
         }
+    }
+
+    private func ensureOpenTimesEngine(for engineer: UserProfile) {
+        if let engine = openTimesEngine, engine.engineerId != engineer.id {
+            engine.stop()
+            openTimesEngine = nil
+        }
+
+        if openTimesEngine == nil {
+            isLoadingOpenTimes = true
+            openTimesMessage = nil
+            openTimesError = nil
+            openTimesEngine = OpenTimesEngine(
+                engineerId: engineer.id,
+                firestore: firestore,
+                selectedDate: selectedCalendarDate,
+                onUpdate: { [weak self] update in
+                    guard let self else { return }
+                    self.openTimesSections = update.sections
+                    self.openTimesMessage = update.message
+                    self.openTimesError = update.errorMessage
+                    self.isLoadingOpenTimes = update.isLoading
+                }
+            )
+        }
+
+        openTimesEngine?.updateSelectedDate(selectedCalendarDate)
+    }
+
+    private func resetOpenTimes() {
+        openTimesEngine?.stop()
+        openTimesEngine = nil
+        openTimesSections = []
+        openTimesMessage = nil
+        openTimesError = nil
+        isLoadingOpenTimes = false
     }
 
     private func loadArtistBookings(for user: UserProfile) async {
@@ -606,8 +671,7 @@ final class BookingInboxViewModel: ObservableObject {
             do {
                 let profiles = try await firestore.fetchUserProfiles(for: Array(missingUserIds))
                 for profile in profiles {
-                    let name = profile.displayName.isEmpty ? profile.username : profile.displayName
-                    userNames[profile.id] = name
+                    userNames[profile.id] = profile.username
                     userProfiles[profile.id] = profile
                 }
             } catch {
@@ -638,8 +702,7 @@ final class BookingInboxViewModel: ObservableObject {
             do {
                 let profiles = try await firestore.fetchUserProfiles(for: Array(missingOwnerIds))
                 for profile in profiles {
-                    let name = profile.displayName.isEmpty ? profile.username : profile.displayName
-                    userNames[profile.id] = name
+                    userNames[profile.id] = profile.username
                     userProfiles[profile.id] = profile
                 }
             } catch {
@@ -864,7 +927,7 @@ final class BookingInboxViewModel: ObservableObject {
         if let current = currentUserProvider(), current.id == id {
             return "You"
         }
-        return userNames[id] ?? userProfiles[id]?.displayName ?? id
+        return userNames[id] ?? userProfiles[id]?.username ?? id
     }
 
     func studioName(for id: String) -> String {
@@ -897,6 +960,8 @@ final class BookingInboxViewModel: ObservableObject {
 
     var availableDisplayModes: [DisplayMode] {
         switch viewerRole {
+        case .engineer:
+            return [.list, .calendar, .openTimes]
         case .studioOwner:
             return [.list, .calendar, .schedule]
         default:
@@ -1010,10 +1075,418 @@ final class BookingInboxViewModel: ObservableObject {
             for profile in profiles {
                 engineerProfiles[profile.id] = profile
                 userProfiles[profile.id] = profile
-                userNames[profile.id] = profile.displayName.isEmpty ? profile.username : profile.displayName
+                userNames[profile.id] = profile.username
             }
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    struct OpenTimesSection: Identifiable, Equatable {
+        struct OpenRoom: Identifiable, Equatable {
+            struct Window: Identifiable, Equatable {
+                let id: UUID = UUID()
+                let start: Date
+                let end: Date
+                let formattedRange: String
+            }
+
+            let room: Room
+            let windows: [Window]
+
+            var id: String { room.id }
+        }
+
+        let studio: Studio
+        let rooms: [OpenRoom]
+        let message: String?
+        let timezone: TimeZone
+        let dayStart: Date
+        let defaultRoomId: String?
+
+        var id: String { studio.id }
+    }
+
+    struct OpenTimesUpdate {
+        let sections: [OpenTimesSection]
+        let message: String?
+        let errorMessage: String?
+        let isLoading: Bool
+    }
+
+    @MainActor
+    private final class OpenTimesEngine {
+        struct StudioState {
+            var studio: Studio
+            var rooms: [Room]
+            var availability: [AvailabilityEntry]
+            var bookings: [Booking]
+        }
+
+        let engineerId: String
+        private let firestore: any FirestoreService
+        private let onUpdate: (OpenTimesUpdate) -> Void
+
+        private var studiosTask: Task<Void, Never>?
+        private var roomTasks: [String: Task<Void, Never>] = [:]
+        private var availabilityTasks: [String: Task<Void, Never>] = [:]
+        private var bookingTasks: [String: Task<Void, Never>] = [:]
+        private var studioStates: [String: StudioState] = [:]
+        private var latestSections: [OpenTimesSection] = []
+        private var isLoading: Bool = true {
+            didSet { publishCurrentState() }
+        }
+        private var message: String? {
+            didSet { publishCurrentState() }
+        }
+        private var errorMessage: String? {
+            didSet { publishCurrentState() }
+        }
+
+        private var selectedDate: Date {
+            didSet { recompute() }
+        }
+
+        init(
+            engineerId: String,
+            firestore: any FirestoreService,
+            selectedDate: Date,
+            onUpdate: @escaping (OpenTimesUpdate) -> Void
+        ) {
+            self.engineerId = engineerId
+            self.firestore = firestore
+            self.selectedDate = selectedDate
+            self.onUpdate = onUpdate
+            publishCurrentState()
+            listenForStudios()
+        }
+
+        func updateSelectedDate(_ newDate: Date) {
+            guard selectedDate != newDate else { return }
+            selectedDate = newDate
+        }
+
+        func stop() {
+            studiosTask?.cancel()
+            studiosTask = nil
+            roomTasks.values.forEach { $0.cancel() }
+            roomTasks.removeAll()
+            availabilityTasks.values.forEach { $0.cancel() }
+            availabilityTasks.removeAll()
+            bookingTasks.values.forEach { $0.cancel() }
+            bookingTasks.removeAll()
+        }
+
+        private func listenForStudios() {
+            isLoading = true
+            studiosTask = Task {
+                do {
+                    for try await studios in firestore.observeStudios() {
+                        guard Task.isCancelled == false else { break }
+                        handleStudiosUpdate(studios)
+                    }
+                } catch {
+                    handleError(error)
+                }
+            }
+        }
+
+        private func handleStudiosUpdate(_ studios: [Studio]) {
+            isLoading = false
+            errorMessage = nil
+
+            let relevant = studios.filter { $0.approvedEngineerIds.contains(engineerId) }
+            let relevantIDs = Set(relevant.map(\.id))
+
+            for studioId in studioStates.keys where relevantIDs.contains(studioId) == false {
+                tearDownStudio(studioId)
+            }
+
+            guard relevant.isEmpty == false else {
+                studioStates.removeAll()
+                latestSections = []
+                message = "You haven’t been approved at any studios yet."
+                publishCurrentState()
+                return
+            }
+
+            message = nil
+
+            for studio in relevant {
+                if var state = studioStates[studio.id] {
+                    state.studio = studio
+                    studioStates[studio.id] = state
+                } else {
+                    studioStates[studio.id] = StudioState(
+                        studio: studio,
+                        rooms: [],
+                        availability: [],
+                        bookings: []
+                    )
+                    startRoomObserver(for: studio.id)
+                    startAvailabilityObserver(for: studio.id)
+                    startBookingObserver(for: studio.id)
+                }
+            }
+
+            recompute()
+        }
+
+        private func startRoomObserver(for studioId: String) {
+            guard roomTasks[studioId] == nil else { return }
+            roomTasks[studioId] = Task {
+                do {
+                    for try await rooms in firestore.observeRooms(for: studioId) {
+                        guard Task.isCancelled == false else { break }
+                        guard var state = studioStates[studioId] else { continue }
+                        state.rooms = rooms
+                        studioStates[studioId] = state
+                        recompute()
+                    }
+                } catch {
+                    handleError(error)
+                }
+            }
+        }
+
+        private func startAvailabilityObserver(for studioId: String) {
+            guard availabilityTasks[studioId] == nil else { return }
+            availabilityTasks[studioId] = Task {
+                do {
+                    for try await entries in firestore.observeAvailability(scope: .studio, ownerId: studioId) {
+                        guard Task.isCancelled == false else { break }
+                        guard var state = studioStates[studioId] else { continue }
+                        state.availability = entries
+                        studioStates[studioId] = state
+                        recompute()
+                    }
+                } catch {
+                    handleError(error)
+                }
+            }
+        }
+
+        private func startBookingObserver(for studioId: String) {
+            guard bookingTasks[studioId] == nil else { return }
+            bookingTasks[studioId] = Task {
+                do {
+                    for try await bookings in firestore.observeBookings(for: studioId, role: .studio) {
+                        guard Task.isCancelled == false else { break }
+                        guard var state = studioStates[studioId] else { continue }
+                        state.bookings = bookings
+                        studioStates[studioId] = state
+                        recompute()
+                    }
+                } catch {
+                    handleError(error)
+                }
+            }
+        }
+
+        private func tearDownStudio(_ studioId: String) {
+            roomTasks[studioId]?.cancel()
+            roomTasks.removeValue(forKey: studioId)
+            availabilityTasks[studioId]?.cancel()
+            availabilityTasks.removeValue(forKey: studioId)
+            bookingTasks[studioId]?.cancel()
+            bookingTasks.removeValue(forKey: studioId)
+            studioStates.removeValue(forKey: studioId)
+        }
+
+        private func handleError(_ error: Error) {
+            isLoading = false
+            errorMessage = error.localizedDescription
+        }
+
+        private func recompute() {
+            guard studioStates.isEmpty == false else {
+                latestSections = []
+                publishCurrentState()
+                return
+            }
+
+            var sections: [OpenTimesSection] = []
+
+            for state in studioStates.values {
+                let studio = state.studio
+                let timezone = TimeZone(identifier: studio.operatingSchedule.timeZoneIdentifier) ?? .current
+                var calendar = Calendar(identifier: .gregorian)
+                calendar.timeZone = timezone
+                let dayStart = calendar.startOfDay(for: selectedDate)
+                guard let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) else { continue }
+
+                var sectionMessage: String?
+
+                if studio.operatingSchedule.blackoutDates.contains(where: { calendar.isDate($0, inSameDayAs: dayStart) }) {
+                    sectionMessage = "Studio is blocked on this date."
+                }
+
+                let baseWindows = AvailabilityWindowCalculator.baseWindows(
+                    schedule: studio.operatingSchedule,
+                    dayStart: dayStart,
+                    dayEnd: dayEnd,
+                    calendar: calendar
+                )
+
+                if baseWindows.isEmpty && sectionMessage == nil {
+                    sectionMessage = "Studio is closed on this date."
+                }
+
+                let formatter = AvailabilityWindowCalculator.timeFormatter(timezone: timezone)
+                let generalEntries = state.availability.filter { $0.roomId == nil }
+                let generalBusy = availabilityIntervals(
+                    from: generalEntries,
+                    dayStart: dayStart,
+                    dayEnd: dayEnd,
+                    calendar: calendar
+                )
+
+                var openRooms: [OpenTimesSection.OpenRoom] = []
+
+                if state.rooms.isEmpty {
+                    sectionMessage = sectionMessage ?? "No rooms have been added yet."
+                }
+
+                for room in state.rooms.sorted(by: { $0.name < $1.name }) {
+                    guard baseWindows.isEmpty == false else { break }
+
+                    var openIntervals = baseWindows
+
+                    for interval in generalBusy {
+                        openIntervals = AvailabilityWindowCalculator.subtract(openIntervals, removing: interval)
+                        if openIntervals.isEmpty { break }
+                    }
+
+                    guard openIntervals.isEmpty == false else {
+                        openRooms.append(
+                            OpenTimesSection.OpenRoom(
+                                room: room,
+                                windows: []
+                            )
+                        )
+                        continue
+                    }
+
+                    let roomEntries = state.availability.filter { $0.roomId == room.id }
+                    let roomBusy = availabilityIntervals(
+                        from: roomEntries,
+                        dayStart: dayStart,
+                        dayEnd: dayEnd,
+                        calendar: calendar
+                    )
+
+                    for interval in roomBusy {
+                        openIntervals = AvailabilityWindowCalculator.subtract(openIntervals, removing: interval)
+                        if openIntervals.isEmpty { break }
+                    }
+
+                    guard openIntervals.isEmpty == false else {
+                        openRooms.append(
+                            OpenTimesSection.OpenRoom(
+                                room: room,
+                                windows: []
+                            )
+                        )
+                        continue
+                    }
+
+                    let relevantStatuses: Set<BookingStatus> = [.pending, .confirmed, .rescheduled]
+                    let bookings = state.bookings.filter { booking in
+                        booking.roomId == room.id && relevantStatuses.contains(booking.status)
+                    }
+
+                    for booking in bookings {
+                        if let interval = AvailabilityWindowCalculator.clampedInterval(
+                            for: booking,
+                            dayStart: dayStart,
+                            dayEnd: dayEnd
+                        ) {
+                            openIntervals = AvailabilityWindowCalculator.subtract(openIntervals, removing: interval)
+                            if openIntervals.isEmpty { break }
+                        }
+                    }
+
+                    let windows = openIntervals
+                        .sorted { $0.start < $1.start }
+                        .map { interval -> OpenTimesSection.OpenRoom.Window in
+                            let adjustedEnd: Date
+                            if interval.end >= dayEnd {
+                                adjustedEnd = (calendar.date(byAdding: .minute, value: -1, to: dayEnd) ?? interval.end)
+                            } else {
+                                adjustedEnd = interval.end
+                            }
+                            return OpenTimesSection.OpenRoom.Window(
+                                start: interval.start,
+                                end: adjustedEnd,
+                                formattedRange: "\(formatter.string(from: interval.start)) – \(formatter.string(from: adjustedEnd))"
+                            )
+                        }
+
+                    openRooms.append(OpenTimesSection.OpenRoom(room: room, windows: windows))
+                }
+
+                let defaultRoomId = state.rooms.first(where: { $0.isDefault })?.id ?? openRooms.first?.room.id
+
+                sections.append(
+                    OpenTimesSection(
+                        studio: studio,
+                        rooms: openRooms,
+                        message: sectionMessage,
+                        timezone: timezone,
+                        dayStart: dayStart,
+                        defaultRoomId: defaultRoomId
+                    )
+                )
+            }
+
+            sections.sort { $0.studio.name < $1.studio.name }
+            latestSections = sections
+            publishCurrentState()
+        }
+
+        private func availabilityIntervals(
+            from entries: [AvailabilityEntry],
+            dayStart: Date,
+            dayEnd: Date,
+            calendar: Calendar
+        ) -> [DateInterval] {
+            var intervals: [DateInterval] = []
+
+            for entry in entries {
+                switch entry.kind {
+                case .recurring:
+                    if let interval = AvailabilityWindowCalculator.recurringInterval(
+                        for: entry,
+                        dayStart: dayStart,
+                        dayEnd: dayEnd,
+                        calendar: calendar
+                    ) {
+                        intervals.append(interval)
+                    }
+                case .block, .bookingHold, .selfBooking:
+                    if let interval = AvailabilityWindowCalculator.interval(
+                        for: entry,
+                        dayStart: dayStart,
+                        dayEnd: dayEnd,
+                        calendar: calendar
+                    ) {
+                        intervals.append(interval)
+                    }
+                }
+            }
+
+            return AvailabilityWindowCalculator.mergeOverlapping(intervals)
+        }
+
+        private func publishCurrentState() {
+            onUpdate(
+                OpenTimesUpdate(
+                    sections: latestSections,
+                    message: message,
+                    errorMessage: errorMessage,
+                    isLoading: isLoading
+                )
+            )
         }
     }
 }

@@ -134,7 +134,7 @@ final class FirebaseAuthService: AuthService {
     private func mapUser(_ user: FirebaseAuth.User, fallbackUsername: String) -> UserProfile {
         let creationDate = user.metadata.creationDate ?? Date()
         let username = user.displayName ?? fallbackUsername
-        let displayName = user.displayName ?? "PunchIn Member"
+        let displayName = username
         let profileDetails = AccountProfileDetails()
         return UserProfile(
             id: user.uid,

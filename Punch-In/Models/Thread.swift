@@ -53,6 +53,112 @@ struct ChatThread: Identifiable, Equatable {
     enum Kind: Equatable {
         case direct
         case group
+        case project
+
+        var isGroupLike: Bool {
+            switch self {
+            case .direct:
+                return false
+            case .group, .project:
+                return true
+            }
+        }
+    }
+
+    struct Project: Equatable {
+        struct Task: Identifiable, Equatable {
+            let id: String
+            var title: String
+            var isComplete: Bool
+
+            init(id: String = UUID().uuidString, title: String, isComplete: Bool = false) {
+                self.id = id
+                self.title = title
+                self.isComplete = isComplete
+            }
+        }
+
+        struct FileReference: Identifiable, Equatable {
+            let id: String
+            var name: String
+            var url: URL?
+            var storagePath: String?
+            var contentType: String?
+            var fileSize: Int?
+            var uploadedAt: Date
+            var uploadedBy: ChatParticipant
+
+            init(
+                id: String = UUID().uuidString,
+                name: String,
+                url: URL? = nil,
+                storagePath: String? = nil,
+                contentType: String? = nil,
+                fileSize: Int? = nil,
+                uploadedAt: Date = Date(),
+                uploadedBy: ChatParticipant
+            ) {
+                self.id = id
+                self.name = name
+                self.url = url
+                self.storagePath = storagePath
+                self.contentType = contentType
+                self.fileSize = fileSize
+                self.uploadedAt = uploadedAt
+                self.uploadedBy = uploadedBy
+            }
+        }
+
+        var title: String
+        var summary: String?
+        var tasks: [Task]
+        var files: [FileReference]
+        var sharedDriveURL: URL?
+        var allowsDownloads: Bool
+
+        init(
+            title: String,
+            summary: String? = nil,
+            tasks: [Task] = [],
+            files: [FileReference] = [],
+            sharedDriveURL: URL? = nil,
+            allowsDownloads: Bool = true
+        ) {
+            self.title = title
+            self.summary = summary
+            self.tasks = tasks
+            self.files = files
+            self.sharedDriveURL = sharedDriveURL
+            self.allowsDownloads = allowsDownloads
+        }
+
+        func updatingTask(_ task: Task) -> Project {
+            var copy = self
+            if let index = copy.tasks.firstIndex(where: { $0.id == task.id }) {
+                copy.tasks[index] = task
+            } else {
+                copy.tasks.append(task)
+            }
+            return copy
+        }
+
+        func removingTask(withId id: String) -> Project {
+            var copy = self
+            copy.tasks.removeAll { $0.id == id }
+            return copy
+        }
+
+        func appendingFile(_ file: FileReference) -> Project {
+            var copy = self
+            copy.files.append(file)
+            return copy
+        }
+
+        func removingFile(withId id: String) -> Project {
+            var copy = self
+            copy.files.removeAll { $0.id == id }
+            return copy
+        }
     }
 
     struct GroupSettings: Equatable {
@@ -70,6 +176,7 @@ struct ChatThread: Identifiable, Equatable {
     var groupSettings: GroupSettings?
     var lastMessageAt: Date?
     var messages: [ChatMessage]
+    var project: Project?
 
     init(
         id: String = UUID().uuidString,
@@ -78,7 +185,8 @@ struct ChatThread: Identifiable, Equatable {
         kind: Kind,
         groupSettings: GroupSettings? = nil,
         lastMessageAt: Date? = nil,
-        messages: [ChatMessage] = []
+        messages: [ChatMessage] = [],
+        project: Project? = nil
     ) {
         self.id = id
         self.creatorId = creatorId
@@ -87,9 +195,16 @@ struct ChatThread: Identifiable, Equatable {
         self.groupSettings = groupSettings
         self.lastMessageAt = lastMessageAt
         self.messages = messages
+        self.project = project
     }
 
-    var isGroup: Bool { kind == .group }
+    var isGroup: Bool { kind.isGroupLike }
+    var isProject: Bool {
+        if case .project = kind {
+            return true
+        }
+        return false
+    }
 
     var allowsParticipantEditing: Bool {
         groupSettings?.allowsParticipantEditing ?? false
@@ -140,6 +255,12 @@ struct ChatThread: Identifiable, Equatable {
     func updating(groupSettings: GroupSettings) -> ChatThread {
         var copy = self
         copy.groupSettings = groupSettings
+        return copy
+    }
+
+    func updating(project: Project?) -> ChatThread {
+        var copy = self
+        copy.project = project
         return copy
     }
 }
@@ -236,7 +357,67 @@ extension ChatThread {
             ]
         )
 
-        return [groupThread, studioThread, directThread]
+        let projectThreadId = UUID().uuidString
+        let projectCreator = participants[0]
+        let projectThread = ChatThread(
+            id: projectThreadId,
+            creatorId: projectCreator.id,
+            participants: [projectCreator, participants[2], participants[3], studios[0]],
+            kind: .project,
+            groupSettings: .init(
+                name: "Launch Campaign",
+                photo: ChatMedia(remoteURL: URL(string: "https://picsum.photos/seed/project/200")),
+                allowsParticipantEditing: true
+            ),
+            lastMessageAt: Date().addingTimeInterval(-3_000),
+            messages: [
+                ChatMessage(
+                    threadId: projectThreadId,
+                    sender: projectCreator,
+                    sentAt: Date().addingTimeInterval(-4_200),
+                    content: .text("Kicking off the project thread for the release roll-out.")
+                ),
+                ChatMessage(
+                    threadId: projectThreadId,
+                    sender: participants[3],
+                    sentAt: Date().addingTimeInterval(-3_400),
+                    content: .text("I'll upload the artwork concepts to the files tab.")
+                )
+            ],
+            project: .init(
+                title: "Launch Campaign",
+                summary: "Coordinate assets and rollout tasks for the upcoming single release.",
+                tasks: [
+                    .init(title: "Finalize cover art"),
+                    .init(title: "Schedule teaser posts", isComplete: true),
+                    .init(title: "Upload mastered WAV to drive")
+                ],
+                files: [
+                    .init(
+                        name: "Creative Brief.pdf",
+                        url: URL(string: "https://example.com/files/brief.pdf"),
+                        storagePath: "project-files/\(projectThreadId)/brief/CreativeBrief.pdf",
+                        contentType: "application/pdf",
+                        fileSize: 1_048_576,
+                        uploadedAt: Date().addingTimeInterval(-8_600),
+                        uploadedBy: projectCreator
+                    ),
+                    .init(
+                        name: "Teaser Story Cut.mp4",
+                        url: URL(string: "https://example.com/files/teaser.mp4"),
+                        storagePath: "project-files/\(projectThreadId)/teaser/TeaserStoryCut.mp4",
+                        contentType: "video/mp4",
+                        fileSize: 12_582_912,
+                        uploadedAt: Date().addingTimeInterval(-7_200),
+                        uploadedBy: participants[3]
+                    )
+                ],
+                sharedDriveURL: URL(string: "https://drive.example.com/project/launch"),
+                allowsDownloads: true
+            )
+        )
+
+        return [projectThread, groupThread, studioThread, directThread]
     }
 }
 

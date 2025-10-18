@@ -66,57 +66,46 @@ private struct MainTabView: View {
     @State private var uploadBannerHeight: CGFloat = 0
     @State private var isShowingNowPlaying = false
     @State private var deepLinkMediaItem: ProfileMediaItem?
+    @State private var radioProgress: CGFloat = 0
+    @State private var radioDragStartProgress: CGFloat = 0
+    @State private var isDraggingRadio = false
 
     var body: some View {
-        ZStack(alignment: .bottom) {
-            content(for: appState.selectedTab)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(
-                    .bottom,
-                    tabBarHeight
-                        + (uploadManager.activeUpload == nil ? 0 : uploadBannerHeight + 12)
-                        + (playbackManager.currentItem == nil ? 0 : miniPlayerHeight + 12)
-                )
+        GeometryReader { geometry in
+            let width = max(geometry.size.width, 1)
+            ZStack(alignment: .leading) {
+                baseStack
+                    .frame(width: width)
+                    .offset(x: -radioProgress * width)
+                    .allowsHitTesting(radioProgress < 0.99)
 
-            VStack(spacing: 12) {
-                if uploadManager.activeUpload != nil {
-                    ProfileMediaUploadBanner()
-                        .background(
-                            GeometryReader { proxy in
-                                Color.clear
-                                    .preference(key: UploadBannerHeightPreferenceKey.self, value: proxy.size.height)
+                if shouldShowRadioOverlay {
+                    LocalArtistRadioView(
+                        viewModel: LocalArtistRadioViewModel(
+                            firestoreService: di.firestoreService,
+                            playbackManager: playbackManager,
+                            currentUserProvider: { appState.currentUser }
+                        ),
+                        onClose: {
+                            withAnimation(radioSnapAnimation) {
+                                radioProgress = 0
                             }
-                        )
-                }
-
-                if playbackManager.currentItem != nil {
-                    ProfileMediaMiniPlayer { item in
-                        isShowingNowPlaying = true
-                    }
-                    .background(
-                        GeometryReader { proxy in
-                            Color.clear
-                                .preference(key: MiniPlayerHeightPreferenceKey.self, value: proxy.size.height)
                         }
                     )
+                    .frame(width: width, height: geometry.size.height)
+                    .offset(x: (1 - radioProgress) * width)
+                    .environmentObject(playbackManager)
+                    .environmentObject(appState)
+                    .environment(\.di, di)
+                    .opacity(max(radioProgress, 0.001))
+                    .zIndex(50)
+                    .allowsHitTesting(radioProgress > 0.02)
+                    .transition(.identity)
                 }
-
-                LiquidTabBar(selectedTab: Binding(
-                    get: { appState.selectedTab },
-                    set: { appState.selectedTab = $0 }
-                ))
-                    .padding(.horizontal, 20)
-                    .padding(.bottom, 10)
-                    .overlay {
-                        GeometryReader { proxy in
-                            Color.clear
-                                .preference(key: TabBarHeightPreferenceKey.self, value: proxy.size.height)
-                        }
-                        .allowsHitTesting(false)
-                    }
             }
+            .background(Theme.appBackground.ignoresSafeArea())
+            .gesture(radioDragGesture(width: width))
         }
-        .background(Theme.appBackground.ignoresSafeArea())
         .onPreferenceChange(TabBarHeightPreferenceKey.self) { newValue in
             tabBarHeight = newValue
         }
@@ -133,6 +122,7 @@ private struct MainTabView: View {
                         media: item,
                         firestoreService: di.firestoreService,
                         storageService: di.storageService,
+                        reportService: di.reportService,
                         currentUserProvider: { appState.currentUser }
                     )
                 }
@@ -153,6 +143,7 @@ private struct MainTabView: View {
                     media: media,
                     firestoreService: di.firestoreService,
                     storageService: di.storageService,
+                    reportService: di.reportService,
                     currentUserProvider: { appState.currentUser }
                 )
             }
@@ -247,6 +238,109 @@ private struct MainTabView: View {
                 ProfileTabView()
             }
         }
+    }
+}
+
+extension MainTabView {
+    private var shouldShowRadioOverlay: Bool {
+        radioProgress > 0.001 || isDraggingRadio
+    }
+
+    private var radioSnapAnimation: Animation {
+        .spring(response: 0.32, dampingFraction: 0.82, blendDuration: 0.15)
+    }
+
+    @ViewBuilder
+    private var baseStack: some View {
+        ZStack(alignment: .bottom) {
+            content(for: appState.selectedTab)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(
+                    .bottom,
+                    tabBarHeight
+                        + (uploadManager.activeUpload == nil ? 0 : uploadBannerHeight + 12)
+                        + (playbackManager.currentItem == nil ? 0 : miniPlayerHeight + 12)
+                )
+
+            if shouldShowRadioOverlay == false {
+                VStack(spacing: 12) {
+                    if uploadManager.activeUpload != nil {
+                        ProfileMediaUploadBanner()
+                            .background(
+                                GeometryReader { proxy in
+                                    Color.clear
+                                        .preference(key: UploadBannerHeightPreferenceKey.self, value: proxy.size.height)
+                                }
+                            )
+                    }
+
+                    if playbackManager.currentItem != nil {
+                        ProfileMediaMiniPlayer { _ in
+                            isShowingNowPlaying = true
+                        }
+                        .background(
+                            GeometryReader { proxy in
+                                Color.clear
+                                    .preference(key: MiniPlayerHeightPreferenceKey.self, value: proxy.size.height)
+                            }
+                        )
+                    }
+
+                    LiquidTabBar(selectedTab: Binding(
+                        get: { appState.selectedTab },
+                        set: { appState.selectedTab = $0 }
+                    ))
+                        .padding(.horizontal, 20)
+                        .padding(.bottom, 10)
+                        .overlay {
+                            GeometryReader { proxy in
+                                Color.clear
+                                    .preference(key: TabBarHeightPreferenceKey.self, value: proxy.size.height)
+                            }
+                            .allowsHitTesting(false)
+                        }
+                }
+            }
+        }
+    }
+
+    private func clampProgress(_ value: CGFloat) -> CGFloat {
+        min(max(value, 0), 1)
+    }
+
+    private func radioDragGesture(width: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 15)
+            .onChanged { value in
+                if isDraggingRadio == false {
+                    radioDragStartProgress = radioProgress
+                }
+            }
+            .onChanged { value in
+                let horizontal = value.translation.width
+                let vertical = value.translation.height
+                if isDraggingRadio == false {
+                    guard abs(horizontal) > abs(vertical) else { return }
+                    isDraggingRadio = true
+                }
+                guard isDraggingRadio else { return }
+
+                let delta = -horizontal / width
+                let updated = radioDragStartProgress + delta
+                radioProgress = clampProgress(updated)
+            }
+            .onEnded { value in
+                guard isDraggingRadio else { return }
+                isDraggingRadio = false
+
+                let predicted = radioDragStartProgress + (-value.predictedEndTranslation.width / width)
+                let current = radioDragStartProgress + (-value.translation.width / width)
+                let clampedPredicted = clampProgress(predicted)
+                let clampedCurrent = clampProgress(current)
+                let shouldOpen = clampedPredicted > 0.45 || clampedCurrent > 0.45
+                withAnimation(radioSnapAnimation) {
+                    radioProgress = shouldOpen ? 1 : 0
+                }
+            }
     }
 }
 

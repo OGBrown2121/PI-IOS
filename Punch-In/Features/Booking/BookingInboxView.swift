@@ -125,7 +125,8 @@ private struct InboxContent: View {
                 )
             }
 
-            if viewModel.displayMode == .list {
+            switch viewModel.displayMode {
+            case .list:
                 BookingListView(
                     pending: pending,
                     scheduled: scheduled,
@@ -139,9 +140,11 @@ private struct InboxContent: View {
                     },
                     onSelect: { bookingForDetails = $0 }
                 )
-            } else if viewModel.displayMode == .schedule {
+            case .schedule:
                 EngineerScheduleView()
-            } else {
+            case .openTimes:
+                EngineerOpenTimesView()
+            case .calendar:
                 BookingCalendarView(
                     allowPendingActions: allowPendingActions,
                     onReschedule: { bookingToReschedule = $0 },
@@ -576,6 +579,277 @@ private struct EngineerScheduleView: View {
     }
 }
 
+private struct EngineerOpenTimesView: View {
+    @EnvironmentObject private var viewModel: BookingInboxViewModel
+    @State private var selectedRoomIds: [String: String] = [:]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            dateSelector
+            Divider()
+                .padding(.horizontal)
+                .padding(.top, 8)
+
+            content
+        }
+        .onAppear(perform: syncSelections)
+        .onChange(of: viewModel.openTimesSections) { _ in
+            syncSelections()
+        }
+    }
+
+    private var dateSelector: some View {
+        HStack(spacing: 12) {
+            DatePicker(
+                "Selected date",
+                selection: Binding(
+                    get: { viewModel.selectedCalendarDate },
+                    set: { viewModel.selectedCalendarDate = $0 }
+                ),
+                displayedComponents: .date
+            )
+            .datePickerStyle(.compact)
+            .labelsHidden()
+
+            Spacer()
+
+            HStack(spacing: 12) {
+                Button {
+                    shiftSelectedDate(by: -1)
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.body.weight(.semibold))
+                        .frame(width: 32, height: 32)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(Color(uiColor: .secondarySystemBackground))
+                        )
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    shiftSelectedDate(by: 1)
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.body.weight(.semibold))
+                        .frame(width: 32, height: 32)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(Color(uiColor: .secondarySystemBackground))
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal)
+        .padding(.top, 16)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if viewModel.isLoadingOpenTimes {
+            ProgressView("Loading open times…")
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                .padding()
+        } else if let error = viewModel.openTimesError, error.isEmpty == false {
+            ContentUnavailableView(
+                "Unable to load open times",
+                systemImage: "exclamationmark.triangle",
+                description: Text(error)
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            .padding()
+        } else if let message = viewModel.openTimesMessage, message.isEmpty == false {
+            ContentUnavailableView(
+                "No studios yet",
+                systemImage: "music.note.house",
+                description: Text(message)
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            .padding()
+        } else if viewModel.openTimesSections.isEmpty {
+            ContentUnavailableView(
+                "No availability",
+                systemImage: "calendar.badge.xmark",
+                description: Text("Pick a different date to see open rooms.")
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            .padding()
+        } else {
+            ScrollView {
+                LazyVStack(spacing: 16) {
+                    ForEach(viewModel.openTimesSections) { section in
+                        sectionView(section)
+                            .padding(.horizontal)
+                    }
+                }
+                .padding(.top, 20)
+                .padding(.bottom, 32)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func sectionView(_ section: BookingInboxViewModel.OpenTimesSection) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(section.studio.name)
+                        .font(.headline)
+                    Text(formattedDate(for: section))
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Text(timezoneDescription(for: section.timezone))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                roomSelector(for: section)
+            }
+
+            if let message = section.message {
+                Text(message)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                roomWindows(for: section)
+            }
+        }
+        .padding(20)
+        .background(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(Color(uiColor: .secondarySystemGroupedBackground))
+        )
+    }
+
+    @ViewBuilder
+    private func roomSelector(for section: BookingInboxViewModel.OpenTimesSection) -> some View {
+        if let room = selectedRoom(in: section) {
+            if section.rooms.count <= 1 {
+                Text(room.room.name)
+                    .font(.subheadline.weight(.semibold))
+            } else {
+                Menu {
+                    ForEach(section.rooms) { candidate in
+                        Button {
+                            selectedRoomIds[section.id] = candidate.id
+                        } label: {
+                            if candidate.id == room.id {
+                                Label(candidate.room.name, systemImage: "checkmark")
+                            } else {
+                                Text(candidate.room.name)
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Text(room.room.name)
+                            .font(.subheadline.weight(.semibold))
+                        Image(systemName: "chevron.down")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(Color(uiColor: .tertiarySystemGroupedBackground))
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+        } else {
+            Text("No rooms")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private func roomWindows(for section: BookingInboxViewModel.OpenTimesSection) -> some View {
+        if let room = selectedRoom(in: section) {
+            if room.windows.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("No open windows")
+                        .font(.callout.weight(.semibold))
+                    Text("All sessions are booked for this room on the selected date.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(room.windows) { window in
+                        HStack(spacing: 12) {
+                            Image(systemName: "clock.fill")
+                                .font(.body.weight(.semibold))
+                                .foregroundStyle(Color.accentColor)
+                            Text(window.formattedRange)
+                                .font(.body)
+                        }
+                        .padding(.vertical, 8)
+                        .padding(.horizontal, 12)
+                        .background(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .fill(Color(uiColor: .tertiarySystemGroupedBackground))
+                        )
+                    }
+                }
+            }
+        } else {
+            Text("No rooms available.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func syncSelections() {
+        var updated: [String: String] = [:]
+        let sections = viewModel.openTimesSections
+        let existing = selectedRoomIds
+
+        for section in sections {
+            if let current = existing[section.id],
+               section.rooms.contains(where: { $0.id == current }) {
+                updated[section.id] = current
+            } else if let defaultId = section.defaultRoomId {
+                updated[section.id] = defaultId
+            } else if let firstId = section.rooms.first?.id {
+                updated[section.id] = firstId
+            }
+        }
+
+        if updated != selectedRoomIds {
+            selectedRoomIds = updated
+        }
+    }
+
+    private func selectedRoom(in section: BookingInboxViewModel.OpenTimesSection) -> BookingInboxViewModel.OpenTimesSection.OpenRoom? {
+        let preferred = selectedRoomIds[section.id]
+        return section.rooms.first { $0.id == preferred } ?? section.rooms.first
+    }
+
+    private func formattedDate(for section: BookingInboxViewModel.OpenTimesSection) -> String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .full
+        formatter.timeStyle = .none
+        formatter.timeZone = section.timezone
+        return formatter.string(from: section.dayStart)
+    }
+
+    private func timezoneDescription(for timezone: TimeZone) -> String {
+        if let localized = timezone.localizedName(for: .shortStandard, locale: .current) {
+            return localized
+        }
+        return timezone.identifier
+    }
+
+    private func shiftSelectedDate(by days: Int) {
+        let calendar = Calendar.current
+        if let newDate = calendar.date(byAdding: .day, value: days, to: viewModel.selectedCalendarDate) {
+            viewModel.selectedCalendarDate = newDate
+        }
+    }
+}
+
 private struct EngineerScheduleRow: View {
     let schedule: BookingInboxViewModel.EngineerSchedule
     let labelProvider: BookingInboxViewModel
@@ -724,6 +998,7 @@ private struct BookingDetailSheet: View {
                     viewModel: ChatDetailViewModel(
                         thread: thread,
                         chatService: di.chatService,
+                        storageService: di.storageService,
                         appState: appState
                     )
                 )
@@ -1094,7 +1369,8 @@ private struct BookingDetailSheet: View {
                     creator: creator,
                     participants: participants,
                     kind: kind,
-                    groupSettings: settings
+                    groupSettings: settings,
+                    project: nil
                 )
 
                 localBooking.conversationId = thread.id

@@ -67,7 +67,7 @@ struct EngineerDetailView: View {
                         reviewsSection
                         collaborationSection(for: profile)
                         if canCurrentUserBook {
-                            PrimaryButton(title: "Book with \(profile.displayName.isEmpty ? profile.username : profile.displayName)") {
+                            PrimaryButton(title: "Book with @\(profile.username)") {
                                 handleBookAction()
                             }
                         }
@@ -80,7 +80,7 @@ struct EngineerDetailView: View {
                     .padding(Theme.spacingLarge)
                 }
                 .background(Theme.appBackground)
-                .navigationTitle(profile.displayName.isEmpty ? profile.username : profile.displayName)
+                .navigationTitle("@\(profile.username)")
                 .navigationBarTitleDisplayMode(.inline)
             } else if isLoading {
                 ProgressView()
@@ -111,8 +111,7 @@ struct EngineerDetailView: View {
                         Button(role: .destructive) {
                             isShowingReportSheet = true
                         } label: {
-                            let name = profile.displayName.isEmpty ? profile.username : profile.displayName
-                            Label("Report \(name)", systemImage: "flag")
+                            Label("Report @\(profile.username)", systemImage: "flag")
                         }
                     } label: {
                         Image(systemName: "ellipsis.circle")
@@ -245,14 +244,10 @@ struct EngineerDetailView: View {
                         .stroke(Color.white.opacity(0.25), lineWidth: 1)
                 )
 
-            Text(profile.displayName.isEmpty ? profile.username : profile.displayName)
+            Text("@\(profile.username)")
                 .font(.title2.weight(.heavy))
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.white)
-
-            Text("@\(profile.username)")
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(.white.opacity(0.85))
 
             if !profile.profileDetails.bio.isEmpty {
                 Text(profile.profileDetails.bio)
@@ -437,7 +432,7 @@ struct EngineerDetailView: View {
     }
 
     private func detailsSection(for profile: UserProfile) -> some View {
-        sectionCard(title: "About \(profile.displayName.isEmpty ? profile.username : profile.displayName)", icon: "person.fill") {
+        sectionCard(title: "About @\(profile.username)", icon: "person.fill") {
             VStack(alignment: .leading, spacing: Theme.spacingSmall) {
                 profileDetailRow(label: "Joined", value: formatted(date: profile.createdAt))
                 Divider()
@@ -560,7 +555,7 @@ struct EngineerDetailView: View {
 
     private func collaborationSection(for profile: UserProfile) -> some View {
         sectionCard(title: "Collaboration", icon: "waveform.path.ecg") {
-            Text("Interested in working with \(profile.displayName.isEmpty ? profile.username : profile.displayName)? Reach out through chat or invite them to a project once booking launches.")
+            Text("Interested in working with @\(profile.username)? Reach out through chat or invite them to a project once booking launches.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.leading)
@@ -669,7 +664,7 @@ struct EngineerDetailView: View {
     }
 
     private func initials(for profile: UserProfile) -> String {
-        let name = profile.displayName.isEmpty ? profile.username : profile.displayName
+        let name = profile.username.isEmpty ? profile.id : profile.username
         let components = name.split(separator: " ")
         if let first = components.first, let last = components.dropFirst().first {
             return String(first.first!).uppercased() + String(last.first!).uppercased()

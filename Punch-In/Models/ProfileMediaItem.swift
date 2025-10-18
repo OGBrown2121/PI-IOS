@@ -18,6 +18,9 @@ struct ProfileMediaItem: Identifiable, Equatable, Codable {
     var ratings: [String: Int]
     var pinnedRank: Int?
     var isShared: Bool
+    var isRadioEligible: Bool
+    var primaryGenre: MusicGenre?
+    var originState: USState?
     var createdAt: Date
     var updatedAt: Date
 
@@ -38,6 +41,9 @@ struct ProfileMediaItem: Identifiable, Equatable, Codable {
         ratings: [String: Int] = [:],
         pinnedRank: Int? = nil,
         isShared: Bool = true,
+        isRadioEligible: Bool = false,
+        primaryGenre: MusicGenre? = nil,
+        originState: USState? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -57,6 +63,9 @@ struct ProfileMediaItem: Identifiable, Equatable, Codable {
         self.ratings = ratings
         self.pinnedRank = pinnedRank
         self.isShared = isShared
+        self.isRadioEligible = isRadioEligible
+        self.primaryGenre = primaryGenre
+        self.originState = originState
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -351,7 +360,9 @@ extension ProfileMediaItem {
         ownerId: String = UUID().uuidString,
         format: ProfileMediaFormat = .audio,
         category: ProfileMediaCategory = .song,
-        pinnedRank: Int? = nil
+        pinnedRank: Int? = nil,
+        primaryGenre: MusicGenre? = .hipHop,
+        originState: USState? = .georgia
     ) -> ProfileMediaItem {
         ProfileMediaItem(
             ownerId: ownerId,
@@ -366,6 +377,9 @@ extension ProfileMediaItem {
             collaborators: [],
             ratings: [:],
             pinnedRank: pinnedRank,
+            isRadioEligible: format == .audio,
+            primaryGenre: primaryGenre,
+            originState: originState,
             createdAt: Date(),
             updatedAt: Date()
         )

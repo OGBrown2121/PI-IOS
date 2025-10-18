@@ -9,6 +9,7 @@ final class MediaPlaybackManager: ObservableObject {
     @Published private(set) var progress: Double = 0
     @Published private(set) var currentTime: TimeInterval = 0
     @Published private(set) var duration: TimeInterval = 0
+    @Published private(set) var playbackCompletionCount: Int = 0
 
     private let firestoreService: any FirestoreService
     private let player: AVPlayer
@@ -148,6 +149,7 @@ final class MediaPlaybackManager: ObservableObject {
                 self.progress = 0
                 self.currentTime = 0
                 self.hasRecordedPlayForCurrentItem = false
+                self.playbackCompletionCount += 1
             }
         }
     }

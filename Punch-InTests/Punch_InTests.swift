@@ -127,4 +127,9 @@ struct Punch_InTests {
         #expect(booking.status == .pending)
     }
 
+    @Test func drivePlanStorageLimitsAlignWithPolicy() {
+        #expect(UserProfile.DrivePlan.free.storageLimitBytes == 3 * 1024 * 1024 * 1024)
+        #expect(UserProfile.DrivePlan.subscribed.storageLimitBytes == 10 * 1024 * 1024 * 1024)
+    }
+
 }

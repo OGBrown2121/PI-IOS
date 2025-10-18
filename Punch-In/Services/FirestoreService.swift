@@ -1,12 +1,29 @@
 import FirebaseFirestore
 import Foundation
 
+private let beatDownloadRequestExpirationInterval: TimeInterval = 60 * 60 * 24
+
+private func shouldExpireBeatDownloadRequest(
+    _ request: BeatDownloadRequest,
+    now: Date = Date()
+) -> Bool {
+    guard request.status == .pending else { return false }
+    let referenceDate = max(request.updatedAt, request.createdAt)
+    return now.timeIntervalSince(referenceDate) >= beatDownloadRequestExpirationInterval
+}
+
+private enum BeatDownloadActor {
+    case producer(String)
+    case requester(String)
+}
+
 enum FirestoreServiceError: LocalizedError {
     case engineerAlreadyMember
     case engineerRequestNotFound
     case bookingConflict
     case roomNotFound
     case availabilityNotFound
+    case beatDownloadRequestNotFound
 
     var errorDescription: String? {
         switch self {
@@ -20,6 +37,8 @@ enum FirestoreServiceError: LocalizedError {
             return "We couldn't find that room."
         case .availabilityNotFound:
             return "We couldn't locate the availability entry."
+        case .beatDownloadRequestNotFound:
+            return "That download request no longer exists."
         }
     }
 }
@@ -41,6 +60,10 @@ protocol FirestoreService {
     func upsertProfileMedia(_ media: ProfileMediaItem) async throws
     func deleteProfileMedia(ownerId: String, mediaId: String) async throws
     func reorderProfileMediaPins(ownerId: String, orderedPinnedIds: [String]) async throws
+    func fetchRadioEligibleMedia(limit: Int, genre: MusicGenre?, state: USState?) async throws -> [ProfileMediaItem]
+    func fetchRadioLikes(for userId: String) async throws -> [RadioLike]
+    func likeRadioTrack(ownerId: String, mediaId: String, userId: String) async throws
+    func unlikeRadioTrack(ownerId: String, mediaId: String, userId: String) async throws
 
     func fetchEngineerRequest(studioId: String, engineerId: String) async throws -> StudioEngineerRequest?
     func submitEngineerRequest(studioId: String, studioOwnerId: String, engineerId: String) async throws
@@ -59,17 +82,39 @@ protocol FirestoreService {
     func follow(userId: String, targetUserId: String) async throws
     func unfollow(userId: String, targetUserId: String) async throws
     func submitUserReport(_ report: UserReport) async throws
+    func submitMediaReport(_ report: MediaReport) async throws
+    func fetchBeatCatalog(for producerId: String, includeUnpublished: Bool) async throws -> [ProducerBeat]
+    func upsertProducerBeat(_ beat: ProducerBeat) async throws
+    func deleteProducerBeat(producerId: String, beatId: String) async throws
+    func submitBeatDownloadRequest(_ request: BeatDownloadRequest) async throws
+    func fetchBeatDownloadRequests(
+        for producerId: String,
+        status: BeatDownloadRequest.Status?
+    ) async throws -> [BeatDownloadRequest]
+    func updateBeatDownloadRequest(
+        _ request: BeatDownloadRequest,
+        status: BeatDownloadRequest.Status,
+        downloadURL: URL?
+    ) async throws
+    func fetchDriveDownloadRequests(
+        for requesterId: String,
+        status: BeatDownloadRequest.Status?
+    ) async throws -> [BeatDownloadRequest]
+    func deleteDriveDownloadRequest(requestId: String, requesterId: String) async throws
 
     func fetchRooms(for studioId: String) async throws -> [Room]
     func upsertRoom(_ room: Room) async throws
     func deleteRoom(roomId: String, studioId: String) async throws
+    func observeRooms(for studioId: String) -> AsyncThrowingStream<[Room], Error>
 
     func fetchAvailability(scope: AvailabilityScope, ownerId: String) async throws -> [AvailabilityEntry]
     func upsertAvailability(scope: AvailabilityScope, entry: AvailabilityEntry) async throws
     func deleteAvailability(scope: AvailabilityScope, ownerId: String, entryId: String) async throws
+    func observeAvailability(scope: AvailabilityScope, ownerId: String) -> AsyncThrowingStream<[AvailabilityEntry], Error>
 
     func loadBooking(withId id: String) async throws -> Booking?
     func fetchBookings(for participantId: String, role: BookingParticipantRole) async throws -> [Booking]
+    func observeBookings(for participantId: String, role: BookingParticipantRole) -> AsyncThrowingStream<[Booking], Error>
     func createBooking(_ booking: Booking) async throws
     func updateBooking(_ booking: Booking) async throws
 
@@ -160,13 +205,15 @@ struct FirebaseFirestoreService: FirestoreService {
     }
 
     func saveUserProfile(_ profile: UserProfile) async throws {
+        let preferredName = profile.username
+
         var data: [String: Any] = [
             "username": profile.username,
-            "displayName": profile.displayName,
+            "displayName": preferredName,
             "createdAt": Timestamp(date: profile.createdAt),
             "accountType": profile.accountType.rawValue,
             "usernameLowercase": profile.username.lowercased(),
-            "displayNameLowercase": profile.displayName.lowercased()
+            "displayNameLowercase": preferredName.lowercased()
         ]
 
         let sanitizedProjects = profile.profileDetails.upcomingProjects.sanitized()
@@ -187,6 +234,8 @@ struct FirebaseFirestoreService: FirestoreService {
             "email": profile.contact.email,
             "phoneNumber": profile.contact.phoneNumber
         ]
+
+        data["drivePlan"] = profile.drivePlan.rawValue
 
         var engineerSettingsData: [String: Any] = [
             "isPremium": profile.engineerSettings.isPremium,
@@ -273,6 +322,7 @@ struct FirebaseFirestoreService: FirestoreService {
             .collection("media")
             .document(media.id)
             .setData(payload, merge: true)
+        try await syncRadioQueue(with: media)
     }
 
     func submitMediaRating(ownerId: String, mediaId: String, reviewerId: String, rating: Int) async throws {
@@ -329,7 +379,50 @@ struct FirebaseFirestoreService: FirestoreService {
             .collection("media")
             .document(mediaId)
             .delete()
+        try await database.collection("radioQueue")
+            .document(radioQueueDocumentId(ownerId: ownerId, mediaId: mediaId))
+            .delete()
     }
+
+    private func syncRadioQueue(with media: ProfileMediaItem) async throws {
+        let docId = radioQueueDocumentId(ownerId: media.ownerId, mediaId: media.id)
+        let radioRef = database.collection("radioQueue").document(docId)
+
+        let shouldPublish = media.isRadioEligible
+            && media.isShared
+            && media.format == .audio
+            && media.mediaURL != nil
+
+        if shouldPublish {
+            var payload: [String: Any] = [
+                "ownerId": media.ownerId,
+                "mediaId": media.id,
+                "createdAt": Timestamp(date: media.createdAt),
+                "updatedAt": Timestamp(date: media.updatedAt)
+            ]
+
+            if let genre = media.primaryGenre {
+                payload["primaryGenre"] = genre.rawValue
+            } else {
+                payload["primaryGenre"] = FieldValue.delete()
+            }
+
+            if let state = media.originState {
+                payload["originState"] = state.rawValue
+            } else {
+                payload["originState"] = FieldValue.delete()
+            }
+
+            try await radioRef.setData(payload, merge: true)
+        } else {
+            do {
+                try await radioRef.delete()
+            } catch {
+                // Ignore delete failures for missing docs
+            }
+        }
+    }
+
 
     func reorderProfileMediaPins(ownerId: String, orderedPinnedIds: [String]) async throws {
         let batch = database.batch()
@@ -342,6 +435,107 @@ struct FirebaseFirestoreService: FirestoreService {
         }
 
         try await batch.commit()
+    }
+
+    func fetchRadioEligibleMedia(limit: Int = 50, genre: MusicGenre?, state: USState?) async throws -> [ProfileMediaItem] {
+        var query: Query = database
+            .collection("radioQueue")
+            .order(by: "updatedAt", descending: true)
+            .limit(to: limit)
+
+        if let genre {
+            query = query.whereField("primaryGenre", isEqualTo: genre.rawValue)
+        }
+
+        if let state {
+            query = query.whereField("originState", isEqualTo: state.rawValue)
+        }
+
+        let snapshot = try await query.getDocuments(source: .server)
+
+        var results: [ProfileMediaItem] = []
+        for document in snapshot.documents {
+            guard
+                let ownerId = document.data()["ownerId"] as? String,
+                let mediaId = document.data()["mediaId"] as? String,
+                let media = try await loadProfileMedia(ownerId: ownerId, mediaId: mediaId)
+            else {
+                continue
+            }
+            results.append(media)
+        }
+
+        return results
+    }
+
+    func fetchRadioLikes(for userId: String) async throws -> [RadioLike] {
+        let snapshot = try await database
+            .collection("userRadioLikes")
+            .document(userId)
+            .collection("likes")
+            .getDocuments()
+
+        let likes: [RadioLike] = snapshot.documents.compactMap { document in
+            let data = document.data()
+            guard
+                let ownerId = data["ownerId"] as? String,
+                let mediaId = data["mediaId"] as? String
+            else {
+                return nil
+            }
+            let createdAt = (data["createdAt"] as? Timestamp)?.dateValue() ?? Date()
+            return RadioLike(ownerId: ownerId, mediaId: mediaId, userId: userId, createdAt: createdAt)
+        }
+
+        return likes.sorted { $0.createdAt > $1.createdAt }
+    }
+
+    func likeRadioTrack(ownerId: String, mediaId: String, userId: String) async throws {
+        let likeRef = database
+            .collection("users")
+            .document(ownerId)
+            .collection("media")
+            .document(mediaId)
+            .collection("radioLikes")
+            .document(userId)
+
+        let now = Timestamp(date: Date())
+        try await likeRef.setData([
+            "userId": userId,
+            "createdAt": now,
+            "updatedAt": now
+        ], merge: true)
+
+        let userLikeRef = database
+            .collection("userRadioLikes")
+            .document(userId)
+            .collection("likes")
+            .document(mediaId)
+
+        try await userLikeRef.setData([
+            "ownerId": ownerId,
+            "mediaId": mediaId,
+            "createdAt": now,
+            "updatedAt": now
+        ], merge: true)
+    }
+
+    func unlikeRadioTrack(ownerId: String, mediaId: String, userId: String) async throws {
+        let likeRef = database
+            .collection("users")
+            .document(ownerId)
+            .collection("media")
+            .document(mediaId)
+            .collection("radioLikes")
+            .document(userId)
+        try await likeRef.delete()
+
+        let userLikeRef = database
+            .collection("userRadioLikes")
+            .document(userId)
+            .collection("likes")
+            .document(mediaId)
+        try await userLikeRef.delete()
     }
 
     func fetchEngineerRequest(studioId: String, engineerId: String) async throws -> StudioEngineerRequest? {
@@ -721,6 +915,183 @@ struct FirebaseFirestoreService: FirestoreService {
             .setData(payload, merge: false)
     }
 
+    func submitMediaReport(_ report: MediaReport) async throws {
+        var payload: [String: Any] = [
+            "mediaId": report.mediaId,
+            "ownerId": report.ownerId,
+            "reporterUserId": report.reporterUserId,
+            "reason": report.reason.rawValue,
+            "createdAt": Timestamp(date: report.createdAt),
+            "requiresFollowUp": report.reason.requiresDetails
+        ]
+
+        if report.details.isEmpty == false {
+            payload["details"] = report.details
+        }
+
+        if report.evidencePhotoURLs.isEmpty == false {
+            payload["evidencePhotoURLs"] = report.evidencePhotoURLs.map { $0.absoluteString }
+        }
+
+        try await database
+            .collection("mediaReports")
+            .document(report.id)
+            .setData(payload, merge: false)
+    }
+
+    func fetchBeatCatalog(for producerId: String, includeUnpublished: Bool = false) async throws -> [ProducerBeat] {
+        let snapshot = try await database
+            .collection("users")
+            .document(producerId)
+            .collection("beatCatalog")
+            .order(by: "createdAt", descending: true)
+            .getDocuments()
+
+        let beats = snapshot.documents
+            .map { decodeProducerBeat(producerId: producerId, documentID: $0.documentID, data: $0.data()) }
+        return includeUnpublished ? beats : beats.filter { $0.isPublished }
+    }
+
+    func upsertProducerBeat(_ beat: ProducerBeat) async throws {
+        let payload = encodeProducerBeat(beat)
+        try await database
+            .collection("users")
+            .document(beat.producerId)
+            .collection("beatCatalog")
+            .document(beat.id)
+            .setData(payload, merge: true)
+    }
+
+    func deleteProducerBeat(producerId: String, beatId: String) async throws {
+        try await database
+            .collection("users")
+            .document(producerId)
+            .collection("beatCatalog")
+            .document(beatId)
+            .delete()
+    }
+
+    func submitBeatDownloadRequest(_ request: BeatDownloadRequest) async throws {
+        let payload = encodeBeatDownloadRequest(request)
+
+        try await database.collection("beatDownloadRequests")
+            .document(request.id)
+            .setData(payload, merge: false)
+
+        let userRequestRef = database.collection("users")
+            .document(request.requesterId)
+            .collection("driveDownloadRequests")
+            .document(request.id)
+        try await userRequestRef.setData(payload, merge: false)
+
+        let producerRequestRef = database.collection("users")
+            .document(request.producerId)
+            .collection("beatDownloadRequests")
+            .document(request.id)
+        try await producerRequestRef.setData(payload, merge: false)
+
+        let beatRequestRef = database.collection("users")
+            .document(request.producerId)
+            .collection("beatCatalog")
+            .document(request.beatId)
+            .collection("downloadRequests")
+            .document(request.id)
+        try await beatRequestRef.setData(payload, merge: false)
+    }
+
+    func fetchBeatDownloadRequests(
+        for producerId: String,
+        status: BeatDownloadRequest.Status?
+    ) async throws -> [BeatDownloadRequest] {
+        var query: Query = database.collection("users")
+            .document(producerId)
+            .collection("beatDownloadRequests")
+            .order(by: "createdAt", descending: true)
+
+        if let status {
+            query = query.whereField("status", isEqualTo: status.rawValue)
+        }
+
+        let snapshot = try await query.getDocuments(source: .server)
+        let requests = snapshot.documents.map { document in
+            decodeBeatDownloadRequest(documentID: document.documentID, data: document.data())
+        }
+        return try await pruneExpiredBeatDownloadRequests(requests, actor: .producer(producerId))
+    }
+
+    func fetchDriveDownloadRequests(
+        for requesterId: String,
+        status: BeatDownloadRequest.Status?
+    ) async throws -> [BeatDownloadRequest] {
+        var query: Query = database
+            .collection("users")
+            .document(requesterId)
+            .collection("driveDownloadRequests")
+            .order(by: "updatedAt", descending: true)
+
+        if let status {
+            query = query.whereField("status", isEqualTo: status.rawValue)
+        }
+
+        let snapshot = try await query.getDocuments()
+        let requests = snapshot.documents.map { document in
+            decodeBeatDownloadRequest(documentID: document.documentID, data: document.data())
+        }
+        return try await pruneExpiredBeatDownloadRequests(requests, actor: .requester(requesterId))
+    }
+
+    func deleteDriveDownloadRequest(requestId: String, requesterId: String) async throws {
+        try await database
+            .collection("users")
+            .document(requesterId)
+            .collection("driveDownloadRequests")
+            .document(requestId)
+            .delete()
+    }
+
+    func updateBeatDownloadRequest(
+        _ request: BeatDownloadRequest,
+        status: BeatDownloadRequest.Status,
+        downloadURL: URL?
+    ) async throws {
+        let updatedAt = Timestamp(date: Date())
+        var updates: [String: Any] = [
+            "status": status.rawValue,
+            "updatedAt": updatedAt
+        ]
+
+        if let downloadURL {
+            updates["downloadURL"] = downloadURL.absoluteString
+        } else {
+            updates["downloadURL"] = FieldValue.delete()
+        }
+
+        let batch = database.batch()
+
+        let rootRef = database
+            .collection("beatDownloadRequests")
+            .document(request.id)
+        batch.updateData(updates, forDocument: rootRef)
+
+        let producerRequestRef = database
+            .collection("users")
+            .document(request.producerId)
+            .collection("beatDownloadRequests")
+            .document(request.id)
+        batch.updateData(updates, forDocument: producerRequestRef)
+
+        let beatRequestRef = database
+            .collection("users")
+            .document(request.producerId)
+            .collection("beatCatalog")
+            .document(request.beatId)
+            .collection("downloadRequests")
+            .document(request.id)
+        batch.updateData(updates, forDocument: beatRequestRef)
+
+        try await batch.commit()
+    }
+
     func fetchRooms(for studioId: String) async throws -> [Room] {
         let snapshot = try await database
             .collection("studios")
@@ -751,6 +1122,31 @@ struct FirebaseFirestoreService: FirestoreService {
         try await reference.delete()
     }
 
+    func observeRooms(for studioId: String) -> AsyncThrowingStream<[Room], Error> {
+        AsyncThrowingStream { continuation in
+            let listener = database
+                .collection("studios")
+                .document(studioId)
+                .collection("rooms")
+                .order(by: "name")
+                .addSnapshotListener { snapshot, error in
+                    if let error {
+                        continuation.finish(throwing: error)
+                        return
+                    }
+                    guard let snapshot else { return }
+                    let rooms = snapshot.documents.map {
+                        decodeRoom(studioId: studioId, documentID: $0.documentID, data: $0.data())
+                    }
+                    continuation.yield(rooms)
+                }
+
+            continuation.onTermination = { _ in
+                listener.remove()
+            }
+        }
+    }
+
     func fetchAvailability(scope: AvailabilityScope, ownerId: String) async throws -> [AvailabilityEntry] {
         let snapshot = try await availabilityCollection(scope: scope, ownerId: ownerId)
             .order(by: "createdAt", descending: false)
@@ -769,6 +1165,28 @@ struct FirebaseFirestoreService: FirestoreService {
         let reference = availabilityCollection(scope: scope, ownerId: ownerId)
             .document(entryId)
         try await reference.delete()
+    }
+
+    func observeAvailability(scope: AvailabilityScope, ownerId: String) -> AsyncThrowingStream<[AvailabilityEntry], Error> {
+        AsyncThrowingStream { continuation in
+            let listener = availabilityCollection(scope: scope, ownerId: ownerId)
+                .order(by: "createdAt", descending: false)
+                .addSnapshotListener { snapshot, error in
+                    if let error {
+                        continuation.finish(throwing: error)
+                        return
+                    }
+                    guard let snapshot else { return }
+                    let entries = snapshot.documents.map {
+                        decodeAvailability(scope: scope, ownerId: ownerId, documentID: $0.documentID, data: $0.data())
+                    }
+                    continuation.yield(entries)
+                }
+
+            continuation.onTermination = { _ in
+                listener.remove()
+            }
+        }
     }
 
     func loadBooking(withId id: String) async throws -> Booking? {
@@ -791,6 +1209,39 @@ struct FirebaseFirestoreService: FirestoreService {
 
         let snapshot = try await query.order(by: "requestedStart", descending: false).getDocuments()
         return snapshot.documents.map { decodeBooking(documentID: $0.documentID, data: $0.data()) }
+    }
+
+    func observeBookings(for participantId: String, role: BookingParticipantRole) -> AsyncThrowingStream<[Booking], Error> {
+        AsyncThrowingStream { continuation in
+            let collection = database.collection("bookings")
+            let query: Query
+            switch role {
+            case .artist:
+                query = collection.whereField("artistId", isEqualTo: participantId)
+            case .studio:
+                query = collection.whereField("studioId", isEqualTo: participantId)
+            case .engineer:
+                query = collection.whereField("engineerId", isEqualTo: participantId)
+            }
+
+            let listener = query
+                .order(by: "requestedStart", descending: false)
+                .addSnapshotListener { snapshot, error in
+                    if let error {
+                        continuation.finish(throwing: error)
+                        return
+                    }
+                    guard let snapshot else { return }
+                    let bookings = snapshot.documents.map {
+                        decodeBooking(documentID: $0.documentID, data: $0.data())
+                    }
+                    continuation.yield(bookings)
+                }
+
+            continuation.onTermination = { _ in
+                listener.remove()
+            }
+        }
     }
 
     func createBooking(_ booking: Booking) async throws {
@@ -965,6 +1416,19 @@ struct FirebaseFirestoreService: FirestoreService {
         }
 
         payload["isShared"] = media.isShared
+        payload["isRadioEligible"] = media.isRadioEligible
+
+        if let genre = media.primaryGenre {
+            payload["primaryGenre"] = genre.rawValue
+        } else {
+            payload["primaryGenre"] = FieldValue.delete()
+        }
+
+        if let state = media.originState {
+            payload["originState"] = state.rawValue
+        } else {
+            payload["originState"] = FieldValue.delete()
+        }
 
         return payload
     }
@@ -987,6 +1451,259 @@ struct FirebaseFirestoreService: FirestoreService {
         return payload
     }
 
+    private func decodeProducerBeat(producerId: String, documentID: String, data: [String: Any]) -> ProducerBeat {
+        let licenseRaw = data["license"] as? String ?? ProducerBeat.License.nonExclusive.rawValue
+        let previewURLString = data["previewURL"] as? String
+        let artworkURLString = data["artworkURL"] as? String ?? data["coverArtURL"] as? String
+        let stemsURLString = data["stemsZipURL"] as? String ?? data["stemsURL"] as? String
+        let createdAt = (data["createdAt"] as? Timestamp)?.dateValue() ?? Date()
+        let updatedAt = (data["updatedAt"] as? Timestamp)?.dateValue() ?? createdAt
+        let durationSeconds = (data["durationSeconds"] as? Double)
+            ?? (data["durationSeconds"] as? NSNumber)?.doubleValue
+        let primaryGenreRaw = data["primaryGenre"] as? String
+        let primaryGenre = primaryGenreRaw.flatMap(MusicGenre.init(rawValue:))
+        let allowFreeDownload = data["allowFreeDownload"] as? Bool ?? false
+
+        let priceCents: Int = {
+            if let cents = intValue(data["priceCents"]) {
+                return cents
+            }
+            if let price = data["price"] as? Double {
+                return Int((price * 100).rounded())
+            }
+            if let priceNumber = data["price"] as? NSNumber {
+                return Int((priceNumber.doubleValue * 100).rounded())
+            }
+            return 0
+        }()
+
+        return ProducerBeat(
+            id: documentID,
+            producerId: producerId,
+            title: data["title"] as? String ?? "",
+            summary: data["summary"] as? String ?? data["description"] as? String ?? "",
+            license: ProducerBeat.License(rawValue: licenseRaw) ?? .nonExclusive,
+            primaryGenre: primaryGenre,
+            priceCents: priceCents,
+            currencyCode: data["currencyCode"] as? String ?? "USD",
+            previewURL: previewURLString.flatMap(URL.init(string:)),
+            artworkURL: artworkURLString.flatMap(URL.init(string:)),
+            bpm: intValue(data["bpm"]),
+            musicalKey: data["musicalKey"] as? String ?? data["key"] as? String,
+            durationSeconds: durationSeconds,
+            stemsIncluded: data["stemsIncluded"] as? Bool ?? data["includesStems"] as? Bool ?? false,
+            stemsZipURL: stemsURLString.flatMap(URL.init(string:)),
+            tags: data["tags"] as? [String] ?? [],
+            allowFreeDownload: allowFreeDownload,
+            isPublished: data["isPublished"] as? Bool ?? true,
+            createdAt: createdAt,
+            updatedAt: updatedAt
+        )
+    }
+
+    private func encodeProducerBeat(_ beat: ProducerBeat) -> [String: Any] {
+        var payload: [String: Any] = [
+            "producerId": beat.producerId,
+            "title": beat.title,
+            "license": beat.license.rawValue,
+            "priceCents": beat.priceCents,
+            "currencyCode": beat.currencyCode,
+            "stemsIncluded": beat.stemsIncluded,
+            "isPublished": beat.isPublished,
+            "createdAt": Timestamp(date: beat.createdAt),
+            "updatedAt": Timestamp(date: beat.updatedAt),
+            "tags": beat.sanitizedTags
+        ]
+
+        if beat.summary.isEmpty == false {
+            payload["summary"] = beat.summary
+        } else {
+            payload["summary"] = FieldValue.delete()
+        }
+
+        if let previewURL = beat.previewURL?.absoluteString {
+            payload["previewURL"] = previewURL
+        } else {
+            payload["previewURL"] = FieldValue.delete()
+        }
+
+        if let artworkURL = beat.artworkURL?.absoluteString {
+            payload["artworkURL"] = artworkURL
+        } else {
+            payload["artworkURL"] = FieldValue.delete()
+        }
+
+        if let stemsZipURL = beat.stemsZipURL?.absoluteString {
+            payload["stemsZipURL"] = stemsZipURL
+        } else {
+            payload["stemsZipURL"] = FieldValue.delete()
+        }
+
+        if let bpm = beat.bpm {
+            payload["bpm"] = bpm
+        } else {
+            payload["bpm"] = FieldValue.delete()
+        }
+
+        if let musicalKey = beat.musicalKey, musicalKey.isEmpty == false {
+            payload["musicalKey"] = musicalKey
+        } else {
+            payload["musicalKey"] = FieldValue.delete()
+        }
+
+        if let duration = beat.durationSeconds {
+            payload["durationSeconds"] = duration
+        } else {
+            payload["durationSeconds"] = FieldValue.delete()
+        }
+
+        if let primaryGenre = beat.primaryGenre {
+            payload["primaryGenre"] = primaryGenre.rawValue
+        } else {
+            payload["primaryGenre"] = FieldValue.delete()
+        }
+
+        payload["allowFreeDownload"] = beat.allowFreeDownload
+
+        return payload
+    }
+
+    private func encodeBeatDownloadRequest(_ request: BeatDownloadRequest) -> [String: Any] {
+        var payload: [String: Any] = [
+            "id": request.id,
+            "beatId": request.beatId,
+            "producerId": request.producerId,
+            "requesterId": request.requesterId,
+            "status": request.status.rawValue,
+            "createdAt": Timestamp(date: request.createdAt),
+            "updatedAt": Timestamp(date: request.updatedAt)
+        ]
+
+        if let title = request.beatTitle, title.isEmpty == false {
+            payload["beatTitle"] = title
+        }
+
+        if let downloadURL = request.downloadURL {
+            payload["downloadURL"] = downloadURL.absoluteString
+        }
+
+        return payload
+    }
+
+    private func pruneExpiredBeatDownloadRequests(
+        _ requests: [BeatDownloadRequest],
+        actor: BeatDownloadActor,
+        now: Date = Date()
+    ) async throws -> [BeatDownloadRequest] {
+        guard requests.isEmpty == false else { return requests }
+
+        var active: [BeatDownloadRequest] = []
+        var expired: [BeatDownloadRequest] = []
+
+        for request in requests {
+            if shouldExpireBeatDownloadRequest(request, now: now) {
+                expired.append(request)
+            } else {
+                active.append(request)
+            }
+        }
+
+        if expired.isEmpty == false {
+            do {
+                try await deleteBeatDownloadRequests(expired, actor: actor)
+            } catch {
+                if let firestoreError = error as NSError?,
+                   firestoreError.domain == FirestoreErrorDomain,
+                   let code = FirestoreErrorCode.Code(rawValue: firestoreError.code),
+                   code == .permissionDenied {
+                    // Ignore permission issues; the caller should not see expired requests.
+                } else {
+                    throw error
+                }
+            }
+        }
+
+        return active
+    }
+
+    private func deleteBeatDownloadRequests(
+        _ requests: [BeatDownloadRequest],
+        actor: BeatDownloadActor
+    ) async throws {
+        guard requests.isEmpty == false else { return }
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for request in requests {
+                group.addTask {
+                    try await deleteBeatDownloadRequest(request, actor: actor)
+                }
+            }
+            try await group.waitForAll()
+        }
+    }
+
+    private func deleteBeatDownloadRequest(
+        _ request: BeatDownloadRequest,
+        actor: BeatDownloadActor
+    ) async throws {
+        switch actor {
+        case let .producer(producerId):
+            guard producerId == request.producerId else { return }
+
+            let batch = database.batch()
+
+            let producerRequestRef = database
+                .collection("users")
+                .document(producerId)
+                .collection("beatDownloadRequests")
+                .document(request.id)
+            batch.deleteDocument(producerRequestRef)
+
+            if request.beatId.isEmpty == false {
+                let beatRequestRef = database
+                    .collection("users")
+                    .document(producerId)
+                    .collection("beatCatalog")
+                    .document(request.beatId)
+                    .collection("downloadRequests")
+                    .document(request.id)
+                batch.deleteDocument(beatRequestRef)
+            }
+
+            try await batch.commit()
+
+        case let .requester(requesterId):
+            guard requesterId == request.requesterId else { return }
+
+            try await database
+                .collection("users")
+                .document(requesterId)
+                .collection("driveDownloadRequests")
+                .document(request.id)
+                .delete()
+        }
+    }
+
+    private func decodeBeatDownloadRequest(documentID: String, data: [String: Any]) -> BeatDownloadRequest {
+        let statusRaw = data["status"] as? String ?? BeatDownloadRequest.Status.pending.rawValue
+        let createdAt = (data["createdAt"] as? Timestamp)?.dateValue() ?? Date()
+        let updatedAt = (data["updatedAt"] as? Timestamp)?.dateValue() ?? createdAt
+        let beatTitle = data["beatTitle"] as? String
+        let downloadURLString = data["downloadURL"] as? String
+        let downloadURL = downloadURLString.flatMap(URL.init(string:))
+
+        return BeatDownloadRequest(
+            id: documentID,
+            beatId: data["beatId"] as? String ?? "",
+            producerId: data["producerId"] as? String ?? "",
+            requesterId: data["requesterId"] as? String ?? "",
+            beatTitle: beatTitle,
+            downloadURL: downloadURL,
+            status: BeatDownloadRequest.Status(rawValue: statusRaw) ?? .pending,
+            createdAt: createdAt,
+            updatedAt: updatedAt
+        )
+    }
+
     private func decodeProfileMedia(ownerId: String, documentID: String, data: [String: Any]) -> ProfileMediaItem {
         let formatRaw = data["format"] as? String ?? ProfileMediaFormat.audio.rawValue
         let categoryRaw = data["category"] as? String ?? ProfileMediaCategory.other.rawValue
@@ -997,6 +1714,9 @@ struct FirebaseFirestoreService: FirestoreService {
         let collaborators = decodeProfileMediaCollaborators(data["collaborators"])
         let pinnedRank = data["pinnedRank"] as? Int
         let isShared = data["isShared"] as? Bool ?? true
+        let isRadioEligible = data["isRadioEligible"] as? Bool ?? false
+        let primaryGenreRaw = data["primaryGenre"] as? String
+        let originStateRaw = data["originState"] as? String
         let createdAt = (data["createdAt"] as? Timestamp)?.dateValue() ?? Date()
         let updatedAt = (data["updatedAt"] as? Timestamp)?.dateValue() ?? createdAt
         let durationSeconds = data["durationSeconds"] as? Double ?? (data["durationSeconds"] as? NSNumber)?.doubleValue
@@ -1020,6 +1740,9 @@ struct FirebaseFirestoreService: FirestoreService {
             ratings: ratings,
             pinnedRank: pinnedRank,
             isShared: isShared,
+            isRadioEligible: isRadioEligible,
+            primaryGenre: primaryGenreRaw.flatMap(MusicGenre.init(rawValue:)),
+            originState: originStateRaw.flatMap(USState.init(rawValue:)),
             createdAt: createdAt,
             updatedAt: updatedAt
         )
@@ -1053,7 +1776,7 @@ struct FirebaseFirestoreService: FirestoreService {
         }
     }
 
-    private func decodeProfileMediaCollaborators(_ raw: Any?) -> [ProfileMediaCollaborator] {
+private func decodeProfileMediaCollaborators(_ raw: Any?) -> [ProfileMediaCollaborator] {
         guard let array = raw as? [[String: Any]] else { return [] }
         return array.compactMap { entry in
             guard
@@ -1095,10 +1818,12 @@ struct FirebaseFirestoreService: FirestoreService {
         let accountType = AccountType(rawValue: accountTypeRawValue) ?? .artist
         let createdAt = (data["createdAt"] as? Timestamp)?.dateValue() ?? Date()
         let username = data["username"] as? String ?? ""
-        let displayName = data["displayName"] as? String ?? username
+        let displayName = username
         let profileImageURL = (data["profileImageURL"] as? String).flatMap(URL.init(string:))
         let contactData = data["contact"] as? [String: Any] ?? [:]
         let engineerSettingsData = data["engineerSettings"] as? [String: Any] ?? [:]
+        let drivePlanRaw = data["drivePlan"] as? String ?? UserProfile.DrivePlan.free.rawValue
+        let drivePlan = UserProfile.DrivePlan(rawValue: drivePlanRaw) ?? .free
 
         let contact = UserContactInfo(
             email: contactData["email"] as? String ?? "",
@@ -1140,7 +1865,8 @@ struct FirebaseFirestoreService: FirestoreService {
             accountType: accountType,
             profileDetails: details,
             contact: contact,
-            engineerSettings: engineerSettings
+            engineerSettings: engineerSettings,
+            drivePlan: drivePlan
         )
     }
 
@@ -1559,10 +2285,17 @@ struct FirebaseFirestoreService: FirestoreService {
     }
 }
 
+private func radioQueueDocumentId(ownerId: String, mediaId: String) -> String {
+    "\(ownerId)_\(mediaId)"
+}
+
 final class MockFirestoreService: FirestoreService {
     private var storedProfiles: [String: UserProfile] = [:]
     private var storedStudios: [Studio] = Studio.mockList
     private var studioStreams: [UUID: AsyncThrowingStream<[Studio], Error>.Continuation] = [:]
+    private var roomStreams: [String: [UUID: AsyncThrowingStream<[Room], Error>.Continuation]] = [:]
+    private var availabilityStreams: [AvailabilityScope: [String: [UUID: AsyncThrowingStream<[AvailabilityEntry], Error>.Continuation]]] = [:]
+    private var bookingStreams: [String: [UUID: AsyncThrowingStream<[Booking], Error>.Continuation]] = [:]
     private var studioEngineerRequests: [String: [StudioEngineerRequest]] = [:]
     private var studioRooms: [String: [Room]] = [:]
     private var studioAvailabilityStore: [String: [AvailabilityEntry]] = [:]
@@ -1572,7 +2305,17 @@ final class MockFirestoreService: FirestoreService {
     private var followingByUser: [String: Set<String>] = [:]
     private var followersByUser: [String: Set<String>] = [:]
     private var mediaLibraryStore: [String: [ProfileMediaItem]] = [:]
-    private var userReportsStore: [UserReport] = []
+    private var radioLikesStore: [String: [String: RadioLike]] = [:]
+   private var userRadioLikesStore: [String: [String: RadioLike]] = [:]
+   private var radioQueueStore: [String: ProfileMediaItem] = [:]
+   private var userReportsStore: [UserReport] = []
+   private var mediaReportsStore: [MediaReport] = []
+    private var beatCatalogStore: [String: [ProducerBeat]] = [:]
+    private var beatDownloadRequestsStore: [BeatDownloadRequest] = []
+
+    private func radioKey(ownerId: String, mediaId: String) -> String {
+        "\(ownerId)|\(mediaId)"
+    }
 
     func fetchStudios() async throws -> [Studio] {
         storedStudios
@@ -1674,12 +2417,15 @@ final class MockFirestoreService: FirestoreService {
             items.append(media)
         }
         mediaLibraryStore[media.ownerId] = items
+        syncRadioQueueStore(with: media)
     }
 
     func deleteProfileMedia(ownerId: String, mediaId: String) async throws {
         var items = mediaLibraryStore[ownerId] ?? []
         items.removeAll { $0.id == mediaId }
         mediaLibraryStore[ownerId] = items
+        let docId = radioQueueDocumentId(ownerId: ownerId, mediaId: mediaId)
+        radioQueueStore.removeValue(forKey: docId)
     }
 
     func reorderProfileMediaPins(ownerId: String, orderedPinnedIds: [String]) async throws {
@@ -1691,6 +2437,65 @@ final class MockFirestoreService: FirestoreService {
             return copy
         }
         mediaLibraryStore[ownerId] = items
+    }
+
+    func fetchRadioEligibleMedia(limit: Int = 50, genre: MusicGenre?, state: USState?) async throws -> [ProfileMediaItem] {
+        let filtered = radioQueueStore.values.filter { item in
+            let genreMatches = genre.map { item.primaryGenre == $0 } ?? true
+            let stateMatches = state.map { item.originState == $0 } ?? true
+            return genreMatches && stateMatches
+        }
+        .sorted { $0.updatedAt > $1.updatedAt }
+
+        if limit > 0 {
+            return Array(filtered.prefix(limit))
+        }
+        return filtered
+    }
+
+    func fetchRadioLikes(for userId: String) async throws -> [RadioLike] {
+        let likes = userRadioLikesStore[userId]?.values.map { $0 } ?? []
+        return likes.sorted { $0.createdAt > $1.createdAt }
+    }
+
+    func likeRadioTrack(ownerId: String, mediaId: String, userId: String) async throws {
+        let key = radioKey(ownerId: ownerId, mediaId: mediaId)
+        var entries = radioLikesStore[key] ?? [:]
+        entries[userId] = RadioLike(ownerId: ownerId, mediaId: mediaId, userId: userId)
+        radioLikesStore[key] = entries
+
+        var userLikes = userRadioLikesStore[userId] ?? [:]
+        userLikes[mediaId] = RadioLike(ownerId: ownerId, mediaId: mediaId, userId: userId)
+        userRadioLikesStore[userId] = userLikes
+    }
+
+    func unlikeRadioTrack(ownerId: String, mediaId: String, userId: String) async throws {
+        let key = radioKey(ownerId: ownerId, mediaId: mediaId)
+        var entries = radioLikesStore[key] ?? [:]
+        entries.removeValue(forKey: userId)
+        if entries.isEmpty {
+            radioLikesStore.removeValue(forKey: key)
+        } else {
+            radioLikesStore[key] = entries
+        }
+
+        var userLikes = userRadioLikesStore[userId] ?? [:]
+        userLikes.removeValue(forKey: mediaId)
+        if userLikes.isEmpty {
+            userRadioLikesStore.removeValue(forKey: userId)
+        } else {
+            userRadioLikesStore[userId] = userLikes
+        }
+    }
+
+    private func syncRadioQueueStore(with media: ProfileMediaItem) {
+        let docId = radioQueueDocumentId(ownerId: media.ownerId, mediaId: media.id)
+        let shouldPublish = media.isRadioEligible && media.isShared && media.format == .audio && media.mediaURL != nil
+        if shouldPublish {
+            radioQueueStore[docId] = media
+        } else {
+            radioQueueStore.removeValue(forKey: docId)
+        }
     }
 
     func fetchEngineerRequest(studioId: String, engineerId: String) async throws -> StudioEngineerRequest? {
@@ -1859,11 +2664,98 @@ final class MockFirestoreService: FirestoreService {
         }
     }
 
-    func fetchRooms(for studioId: String) async throws -> [Room] {
-        if studioRooms[studioId] == nil {
-            studioRooms[studioId] = [Room(studioId: studioId, name: "Main Room", isDefault: true)]
+    func submitMediaReport(_ report: MediaReport) async throws {
+        if let index = mediaReportsStore.firstIndex(where: { $0.id == report.id }) {
+            mediaReportsStore[index] = report
+        } else {
+            mediaReportsStore.append(report)
         }
-        return studioRooms[studioId]?.sorted(by: { $0.name < $1.name }) ?? []
+    }
+
+    func fetchBeatCatalog(for producerId: String, includeUnpublished: Bool) async throws -> [ProducerBeat] {
+        let beats = beatCatalogStore[producerId] ?? []
+        return beats
+            .filter { includeUnpublished ? true : $0.isPublished }
+            .sorted { lhs, rhs in
+                if lhs.updatedAt == rhs.updatedAt {
+                    return lhs.createdAt > rhs.createdAt
+                }
+                return lhs.updatedAt > rhs.updatedAt
+            }
+    }
+
+    func upsertProducerBeat(_ beat: ProducerBeat) async throws {
+        var beats = beatCatalogStore[beat.producerId] ?? []
+        if let index = beats.firstIndex(where: { $0.id == beat.id }) {
+            beats[index] = beat
+        } else {
+            beats.append(beat)
+        }
+        beatCatalogStore[beat.producerId] = beats
+    }
+
+    func deleteProducerBeat(producerId: String, beatId: String) async throws {
+        var beats = beatCatalogStore[producerId] ?? []
+        beats.removeAll { $0.id == beatId }
+        beatCatalogStore[producerId] = beats
+    }
+
+    func submitBeatDownloadRequest(_ request: BeatDownloadRequest) async throws {
+        if let index = beatDownloadRequestsStore.firstIndex(where: { $0.id == request.id }) {
+            beatDownloadRequestsStore[index] = request
+        } else {
+            beatDownloadRequestsStore.append(request)
+        }
+    }
+
+    func fetchBeatDownloadRequests(
+        for producerId: String,
+        status: BeatDownloadRequest.Status?
+    ) async throws -> [BeatDownloadRequest] {
+        pruneExpiredBeatDownloadRequests()
+        return beatDownloadRequestsStore
+            .filter { request in
+                request.producerId == producerId
+                    && (status == nil || request.status == status)
+            }
+            .sorted { lhs, rhs in lhs.createdAt > rhs.createdAt }
+    }
+
+    func updateBeatDownloadRequest(
+        _ request: BeatDownloadRequest,
+        status: BeatDownloadRequest.Status,
+        downloadURL: URL?
+    ) async throws {
+        guard let index = beatDownloadRequestsStore.firstIndex(where: { $0.id == request.id }) else {
+            throw FirestoreServiceError.beatDownloadRequestNotFound
+        }
+
+        var updated = beatDownloadRequestsStore[index]
+        updated.status = status
+        updated.updatedAt = Date()
+        updated.downloadURL = downloadURL
+        beatDownloadRequestsStore[index] = updated
+    }
+
+    func fetchDriveDownloadRequests(
+        for requesterId: String,
+        status: BeatDownloadRequest.Status?
+    ) async throws -> [BeatDownloadRequest] {
+        pruneExpiredBeatDownloadRequests()
+        return beatDownloadRequestsStore
+            .filter { request in
+                request.requesterId == requesterId
+                    && (status == nil || request.status == status)
+            }
+            .sorted { lhs, rhs in lhs.updatedAt > rhs.updatedAt }
+    }
+
+    func deleteDriveDownloadRequest(requestId: String, requesterId: String) async throws {
+        beatDownloadRequestsStore.removeAll { $0.id == requestId && $0.requesterId == requesterId }
+    }
+
+    func fetchRooms(for studioId: String) async throws -> [Room] {
+        currentRooms(for: studioId)
     }
 
     func upsertRoom(_ room: Room) async throws {
@@ -1874,12 +2766,40 @@ final class MockFirestoreService: FirestoreService {
             rooms.append(room)
         }
         studioRooms[room.studioId] = rooms
+        notifyRoomStreams(for: room.studioId)
     }
 
     func deleteRoom(roomId: String, studioId: String) async throws {
         var rooms = studioRooms[studioId] ?? []
         rooms.removeAll { $0.id == roomId }
         studioRooms[studioId] = rooms
+        notifyRoomStreams(for: studioId)
+    }
+
+    private func pruneExpiredBeatDownloadRequests(now: Date = Date()) {
+        beatDownloadRequestsStore.removeAll { shouldExpireBeatDownloadRequest($0, now: now) }
+    }
+
+    func observeRooms(for studioId: String) -> AsyncThrowingStream<[Room], Error> {
+        AsyncThrowingStream { continuation in
+            let token = UUID()
+            continuation.yield(currentRooms(for: studioId))
+
+            var continuations = roomStreams[studioId] ?? [:]
+            continuations[token] = continuation
+            roomStreams[studioId] = continuations
+
+            continuation.onTermination = { [weak self] _ in
+                guard let self else { return }
+                var continuations = self.roomStreams[studioId] ?? [:]
+                continuations.removeValue(forKey: token)
+                if continuations.isEmpty {
+                    self.roomStreams.removeValue(forKey: studioId)
+                } else {
+                    self.roomStreams[studioId] = continuations
+                }
+            }
+        }
     }
 
     func fetchAvailability(scope: AvailabilityScope, ownerId: String) async throws -> [AvailabilityEntry] {
@@ -1901,6 +2821,7 @@ final class MockFirestoreService: FirestoreService {
                 entries.append(entry)
             }
             studioAvailabilityStore[entry.ownerId] = entries
+            notifyAvailabilityStreams(scope: .studio, ownerId: entry.ownerId)
         case .engineer:
             var entries = engineerAvailabilityStore[entry.ownerId] ?? []
             if let index = entries.firstIndex(where: { $0.id == entry.id }) {
@@ -1909,6 +2830,7 @@ final class MockFirestoreService: FirestoreService {
                 entries.append(entry)
             }
             engineerAvailabilityStore[entry.ownerId] = entries
+            notifyAvailabilityStreams(scope: .engineer, ownerId: entry.ownerId)
         }
     }
 
@@ -1918,10 +2840,42 @@ final class MockFirestoreService: FirestoreService {
             var entries = studioAvailabilityStore[ownerId] ?? []
             entries.removeAll { $0.id == entryId }
             studioAvailabilityStore[ownerId] = entries
+            notifyAvailabilityStreams(scope: .studio, ownerId: ownerId)
         case .engineer:
             var entries = engineerAvailabilityStore[ownerId] ?? []
             entries.removeAll { $0.id == entryId }
             engineerAvailabilityStore[ownerId] = entries
+            notifyAvailabilityStreams(scope: .engineer, ownerId: ownerId)
+        }
+    }
+
+    func observeAvailability(scope: AvailabilityScope, ownerId: String) -> AsyncThrowingStream<[AvailabilityEntry], Error> {
+        AsyncThrowingStream { continuation in
+            let token = UUID()
+            continuation.yield(currentAvailability(for: ownerId, scope: scope))
+
+            var scopeStreams = availabilityStreams[scope] ?? [:]
+            var ownerStreams = scopeStreams[ownerId] ?? [:]
+            ownerStreams[token] = continuation
+            scopeStreams[ownerId] = ownerStreams
+            availabilityStreams[scope] = scopeStreams
+
+            continuation.onTermination = { [weak self] _ in
+                guard let self else { return }
+                var scopeStreams = self.availabilityStreams[scope] ?? [:]
+                var ownerStreams = scopeStreams[ownerId] ?? [:]
+                ownerStreams.removeValue(forKey: token)
+                if ownerStreams.isEmpty {
+                    scopeStreams.removeValue(forKey: ownerId)
+                } else {
+                    scopeStreams[ownerId] = ownerStreams
+                }
+                if scopeStreams.isEmpty {
+                    self.availabilityStreams.removeValue(forKey: scope)
+                } else {
+                    self.availabilityStreams[scope] = scopeStreams
+                }
+            }
         }
     }
 
@@ -1944,11 +2898,36 @@ final class MockFirestoreService: FirestoreService {
         return bookings.sorted { $0.requestedStart < $1.requestedStart }
     }
 
+    func observeBookings(for participantId: String, role: BookingParticipantRole) -> AsyncThrowingStream<[Booking], Error> {
+        AsyncThrowingStream { continuation in
+            let token = UUID()
+            let key = bookingStreamKey(role: role, participantId: participantId)
+
+            continuation.yield(currentBookings(for: participantId, role: role))
+
+            var continuations = bookingStreams[key] ?? [:]
+            continuations[token] = continuation
+            bookingStreams[key] = continuations
+
+            continuation.onTermination = { [weak self] _ in
+                guard let self else { return }
+                var continuations = self.bookingStreams[key] ?? [:]
+                continuations.removeValue(forKey: token)
+                if continuations.isEmpty {
+                    self.bookingStreams.removeValue(forKey: key)
+                } else {
+                    self.bookingStreams[key] = continuations
+                }
+            }
+        }
+    }
+
     func createBooking(_ booking: Booking) async throws {
         if hasConflict(for: booking) {
             throw FirestoreServiceError.bookingConflict
         }
         bookingsStore[booking.id] = booking
+        notifyBookingStreams(for: booking)
     }
 
     func updateBooking(_ booking: Booking) async throws {
@@ -1956,6 +2935,7 @@ final class MockFirestoreService: FirestoreService {
             throw FirestoreServiceError.bookingConflict
         }
         bookingsStore[booking.id] = booking
+        notifyBookingStreams(for: booking)
     }
 
     func fetchReviews(for revieweeId: String, kind: ReviewSubjectKind) async throws -> [Review] {
@@ -2003,9 +2983,91 @@ final class MockFirestoreService: FirestoreService {
         return start...end
     }
 
+    private func currentRooms(for studioId: String) -> [Room] {
+        if studioRooms[studioId] == nil {
+            studioRooms[studioId] = [Room(studioId: studioId, name: "Main Room", isDefault: true)]
+        }
+        return studioRooms[studioId]?.sorted(by: { $0.name < $1.name }) ?? []
+    }
+
+    private func notifyRoomStreams(for studioId: String) {
+        guard let continuations = roomStreams[studioId] else { return }
+        let rooms = currentRooms(for: studioId)
+        for continuation in continuations.values {
+            continuation.yield(rooms)
+        }
+    }
+
+    private func currentAvailability(for ownerId: String, scope: AvailabilityScope) -> [AvailabilityEntry] {
+        let entries: [AvailabilityEntry]
+        switch scope {
+        case .studio:
+            entries = studioAvailabilityStore[ownerId] ?? []
+        case .engineer:
+            entries = engineerAvailabilityStore[ownerId] ?? []
+        }
+        return entries.sorted { $0.createdAt < $1.createdAt }
+    }
+
+    private func notifyAvailabilityStreams(scope: AvailabilityScope, ownerId: String) {
+        guard let ownerStreams = availabilityStreams[scope]?[ownerId] else { return }
+        let entries = currentAvailability(for: ownerId, scope: scope)
+        for continuation in ownerStreams.values {
+            continuation.yield(entries)
+        }
+    }
+
+    private func bookingStreamKey(role: BookingParticipantRole, participantId: String) -> String {
+        "\(role.rawValue)#\(participantId)"
+    }
+
+    private func currentBookings(for participantId: String, role: BookingParticipantRole) -> [Booking] {
+        bookingsStore.values
+            .filter { booking in
+                switch role {
+                case .artist:
+                    return booking.artistId == participantId
+                case .studio:
+                    return booking.studioId == participantId
+                case .engineer:
+                    return booking.engineerId == participantId
+                }
+            }
+            .sorted { $0.requestedStart < $1.requestedStart }
+    }
+
+    private func notifyBookingStreams(for booking: Booking) {
+        let recipients: [(BookingParticipantRole, String)] = [
+            (.artist, booking.artistId),
+            (.engineer, booking.engineerId),
+            (.studio, booking.studioId)
+        ]
+
+        for (role, participantId) in recipients {
+            let key = bookingStreamKey(role: role, participantId: participantId)
+            guard let continuations = bookingStreams[key] else { continue }
+            let bookings = currentBookings(for: participantId, role: role)
+            for continuation in continuations.values {
+                continuation.yield(bookings)
+            }
+        }
+    }
+
     private func notifyStudioStreams() {
         for continuation in studioStreams.values {
             continuation.yield(storedStudios)
         }
     }
 }
+
+#if DEBUG
+extension MockFirestoreService {
+    func seedBeatCatalog(for producerId: String, beats: [ProducerBeat]) {
+        beatCatalogStore[producerId] = beats
+    }
+
+    func seedUserProfile(_ profile: UserProfile) {
+        storedProfiles[profile.id] = profile
+    }
+}
+#endif

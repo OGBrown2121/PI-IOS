@@ -10,7 +10,8 @@ protocol ChatService {
         creator: ChatParticipant,
         participants: [ChatParticipant],
         kind: ChatThread.Kind,
-        groupSettings: ChatThread.GroupSettings?
+        groupSettings: ChatThread.GroupSettings?,
+        project: ChatThread.Project?
     ) async throws -> ChatThread
     func sendMessage(
         threadId: String,
@@ -20,6 +21,10 @@ protocol ChatService {
     func updateGroupSettings(
         threadId: String,
         groupSettings: ChatThread.GroupSettings
+    ) async throws -> ChatThread
+    func updateProject(
+        threadId: String,
+        project: ChatThread.Project
     ) async throws -> ChatThread
     func searchParticipants(query: String, excludingIds: Set<String>) async throws -> [ChatParticipant]
 }
@@ -54,7 +59,8 @@ final class MockChatService: ChatService {
         creator: ChatParticipant,
         participants: [ChatParticipant],
         kind: ChatThread.Kind,
-        groupSettings: ChatThread.GroupSettings?
+        groupSettings: ChatThread.GroupSettings?,
+        project: ChatThread.Project?
     ) async throws -> ChatThread {
         var uniqueParticipants: [ChatParticipant] = []
         var seen = Set<String>()
@@ -70,7 +76,8 @@ final class MockChatService: ChatService {
             kind: kind,
             groupSettings: groupSettings,
             lastMessageAt: nil,
-            messages: []
+            messages: [],
+            project: project
         )
         threads.append(thread)
         return thread
@@ -103,6 +110,17 @@ final class MockChatService: ChatService {
             throw ChatServiceError.threadNotFound
         }
         threads[index] = threads[index].updating(groupSettings: groupSettings)
+        return threads[index]
+    }
+
+    func updateProject(
+        threadId: String,
+        project: ChatThread.Project
+    ) async throws -> ChatThread {
+        guard let index = threads.firstIndex(where: { $0.id == threadId }) else {
+            throw ChatServiceError.threadNotFound
+        }
+        threads[index] = threads[index].updating(project: project)
         return threads[index]
     }
 
@@ -141,6 +159,24 @@ final class FirestoreChatService: ChatService {
         static let photo = "photo"
         static let remoteURL = "remoteURL"
         static let allowsEditing = "allowsParticipantEditing"
+        static let project = "project"
+        static let projectTitle = "title"
+        static let projectSummary = "summary"
+        static let projectSharedDriveURL = "sharedDriveURL"
+        static let projectTasks = "tasks"
+        static let projectFiles = "files"
+        static let projectTaskId = "id"
+        static let projectTaskTitle = "title"
+        static let projectTaskIsComplete = "isComplete"
+        static let projectFileId = "id"
+        static let projectFileName = "name"
+        static let projectFileURL = "url"
+        static let projectFileStoragePath = "storagePath"
+        static let projectFileContentType = "contentType"
+        static let projectFileSize = "fileSize"
+        static let projectFileUploadedAt = "uploadedAt"
+        static let projectFileUploadedBy = "uploadedBy"
+        static let projectAllowsDownloads = "allowsDownloads"
         static let createdAt = "createdAt"
         static let sentAt = "sentAt"
         static let sender = "sender"
@@ -156,6 +192,7 @@ final class FirestoreChatService: ChatService {
         static let username = "username"
         static let displayName = "displayName"
         static let accountType = "accountType"
+        static let drivePlan = "drivePlan"
         static let profileImageURL = "profileImageURL"
         static let profileDetails = "profileDetails"
         static let bio = "bio"
@@ -243,7 +280,8 @@ final class FirestoreChatService: ChatService {
         creator: ChatParticipant,
         participants: [ChatParticipant],
         kind: ChatThread.Kind,
-        groupSettings: ChatThread.GroupSettings?
+        groupSettings: ChatThread.GroupSettings?,
+        project: ChatThread.Project?
     ) async throws -> ChatThread {
         let authUserId = currentUserId() ?? creator.id
 
@@ -269,7 +307,8 @@ final class FirestoreChatService: ChatService {
                 accountType: profile.accountType,
                 profileDetails: profile.profileDetails,
                 contact: profile.contact,
-                engineerSettings: profile.engineerSettings
+                engineerSettings: profile.engineerSettings,
+                drivePlan: profile.drivePlan
             )
             return ChatParticipant(user: normalizedProfile)
         }
@@ -277,6 +316,7 @@ final class FirestoreChatService: ChatService {
         let document = firestore.collection(Field.conversations).document()
 
         var finalGroupSettings = groupSettings
+        var finalProject = project
         let creationGroupSettings: ChatThread.GroupSettings? = {
             guard var settings = groupSettings,
                   let media = settings.photo,
@@ -295,7 +335,7 @@ final class FirestoreChatService: ChatService {
 
         var data: [String: Any] = [
             Field.creatorId: authUserId,
-            Field.kind: kind == .group ? "group" : "direct",
+            Field.kind: encodeKind(kind),
             Field.participantIds: participantIds,
             Field.participants: normalizedParticipants.map(encodeParticipant(_:)),
             Field.createdAt: Timestamp(date: dateProvider()),
@@ -312,8 +352,14 @@ final class FirestoreChatService: ChatService {
             data[Field.groupSettings] = NSNull()
         }
 
+        if let project {
+            data[Field.project] = encodeProject(project)
+        } else {
+            data[Field.project] = NSNull()
+        }
+
         Logger.log(
-            "Creating conversation \(document.documentID) as \(authUserId) with participants \(participantIds.joined(separator: ",")) kind=\(kind == .group ? "group" : "direct")"
+            "Creating conversation \(document.documentID) as \(authUserId) with participants \(participantIds.joined(separator: ",")) kind=\(encodeKind(kind))"
         )
 
         try await document.setData(data)
@@ -341,7 +387,8 @@ final class FirestoreChatService: ChatService {
             kind: kind,
             groupSettings: finalGroupSettings,
             lastMessageAt: nil,
-            messages: []
+            messages: [],
+            project: finalProject
         )
         return thread
     }
@@ -432,6 +479,23 @@ final class FirestoreChatService: ChatService {
         return thread
     }
 
+    func updateProject(
+        threadId: String,
+        project: ChatThread.Project
+    ) async throws -> ChatThread {
+        let conversationRef = firestore.collection(Field.conversations).document(threadId)
+        try await conversationRef.updateData([
+            Field.project: encodeProject(project)
+        ])
+
+        let document = try await conversationRef.getDocument()
+        guard var thread = try decodeThread(from: document) else {
+            throw ChatServiceError.threadNotFound
+        }
+        thread = thread.updating(project: project)
+        return thread
+    }
+
     func searchParticipants(query: String, excludingIds: Set<String>) async throws -> [ChatParticipant] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
@@ -449,6 +513,17 @@ final class FirestoreChatService: ChatService {
 
     // MARK: - Encoding helpers
 
+    private func encodeKind(_ kind: ChatThread.Kind) -> String {
+        switch kind {
+        case .direct:
+            return "direct"
+        case .group:
+            return "group"
+        case .project:
+            return "project"
+        }
+    }
+
     private func encodeParticipant(_ participant: ChatParticipant) -> [String: Any] {
         var base: [String: Any] = [
             Field.id: participant.id
@@ -460,6 +535,7 @@ final class FirestoreChatService: ChatService {
             base[Field.username] = profile.username
             base[Field.displayName] = profile.displayName
             base[Field.accountType] = profile.accountType.rawValue
+            base[Field.drivePlan] = profile.drivePlan.rawValue
             base[Field.profileImageURL] = profile.profileImageURL?.absoluteString
             base[Field.createdAt] = Timestamp(date: profile.createdAt)
             let sanitizedProjects = profile.profileDetails.upcomingProjects.sanitized()
@@ -493,6 +569,48 @@ final class FirestoreChatService: ChatService {
         if let media = settings.photo {
             payload[Field.photo] = encodeMedia(media)
         }
+        return payload
+    }
+
+    private func encodeProject(_ project: ChatThread.Project) -> [String: Any] {
+        var payload: [String: Any] = [
+            Field.projectTitle: project.title,
+            Field.projectTasks: project.tasks.map { task in
+                [
+                    Field.projectTaskId: task.id,
+                    Field.projectTaskTitle: task.title,
+                    Field.projectTaskIsComplete: task.isComplete
+                ]
+            },
+            Field.projectFiles: project.files.map { file in
+                var filePayload: [String: Any] = [
+                    Field.projectFileId: file.id,
+                    Field.projectFileName: file.name,
+                    Field.projectFileUploadedAt: Timestamp(date: file.uploadedAt),
+                    Field.projectFileUploadedBy: encodeParticipant(file.uploadedBy)
+                ]
+                if let url = file.url?.absoluteString {
+                    filePayload[Field.projectFileURL] = url
+                }
+                if let storagePath = file.storagePath {
+                    filePayload[Field.projectFileStoragePath] = storagePath
+                }
+                if let contentType = file.contentType {
+                    filePayload[Field.projectFileContentType] = contentType
+                }
+                if let fileSize = file.fileSize {
+                    filePayload[Field.projectFileSize] = fileSize
+                }
+                return filePayload
+            }
+        ]
+        if let summary = project.summary {
+            payload[Field.projectSummary] = summary
+        }
+        if let driveURL = project.sharedDriveURL?.absoluteString {
+            payload[Field.projectSharedDriveURL] = driveURL
+        }
+        payload[Field.projectAllowsDownloads] = project.allowsDownloads
         return payload
     }
 
@@ -560,6 +678,18 @@ final class FirestoreChatService: ChatService {
 
     // MARK: - Decoding helpers
 
+    private func decodeKind(from value: Any?) -> ChatThread.Kind {
+        guard let raw = value as? String else { return .direct }
+        switch raw {
+        case "group":
+            return .group
+        case "project":
+            return .project
+        default:
+            return .direct
+        }
+    }
+
     private func decodeThread(from document: DocumentSnapshot) throws -> ChatThread? {
         guard let data = document.data() else { return nil }
         guard let creatorId = data[Field.creatorId] as? String else { return nil }
@@ -567,13 +697,13 @@ final class FirestoreChatService: ChatService {
         let participants = participantPayload.compactMap(decodeParticipant(_:))
         guard !participants.isEmpty else { return nil }
 
-        let kindRaw = data[Field.kind] as? String ?? "direct"
-        let kind: ChatThread.Kind = kindRaw == "group" ? .group : .direct
+        let kind = decodeKind(from: data[Field.kind])
 
         var settings: ChatThread.GroupSettings?
         if let settingsRaw = data[Field.groupSettings] as? [String: Any] {
             settings = decodeGroupSettings(settingsRaw)
         }
+        let project = decodeProject(from: data[Field.project])
 
         let lastMessageAt = (data[Field.lastMessageAt] as? Timestamp)?.dateValue()
 
@@ -590,7 +720,8 @@ final class FirestoreChatService: ChatService {
             kind: kind,
             groupSettings: settings,
             lastMessageAt: lastMessageAt,
-            messages: messages
+            messages: messages,
+            project: project
         )
     }
 
@@ -602,6 +733,79 @@ final class FirestoreChatService: ChatService {
             photo = decodeMedia(mediaRaw)
         }
         return ChatThread.GroupSettings(name: name, photo: photo, allowsParticipantEditing: allowsEditing)
+    }
+
+    private func decodeProject(from value: Any?) -> ChatThread.Project? {
+        guard let data = value as? [String: Any] else { return nil }
+        guard let title = data[Field.projectTitle] as? String, !title.isEmpty else { return nil }
+
+        let summary = data[Field.projectSummary] as? String
+        let sharedDriveURL: URL?
+        if let urlString = data[Field.projectSharedDriveURL] as? String {
+            sharedDriveURL = URL(string: urlString)
+        } else {
+            sharedDriveURL = nil
+        }
+        let allowsDownloads = data[Field.projectAllowsDownloads] as? Bool ?? true
+
+        let tasks: [ChatThread.Project.Task]
+        if let rawTasks = data[Field.projectTasks] as? [[String: Any]] {
+            tasks = rawTasks.compactMap { rawTask in
+                guard let id = rawTask[Field.projectTaskId] as? String,
+                      let title = rawTask[Field.projectTaskTitle] as? String else {
+                    return nil
+                }
+                let isComplete = rawTask[Field.projectTaskIsComplete] as? Bool ?? false
+                return ChatThread.Project.Task(id: id, title: title, isComplete: isComplete)
+            }
+        } else {
+            tasks = []
+        }
+
+        let files: [ChatThread.Project.FileReference]
+        if let rawFiles = data[Field.projectFiles] as? [[String: Any]] {
+            files = rawFiles.compactMap { rawFile in
+                guard let id = rawFile[Field.projectFileId] as? String,
+                      let name = rawFile[Field.projectFileName] as? String,
+                      let uploadedAtTimestamp = rawFile[Field.projectFileUploadedAt] as? Timestamp,
+                      let uploaderRaw = rawFile[Field.projectFileUploadedBy] as? [String: Any],
+                      let uploader = decodeParticipant(uploaderRaw) else {
+                    return nil
+                }
+                let url = (rawFile[Field.projectFileURL] as? String).flatMap(URL.init(string:))
+                let storagePath = rawFile[Field.projectFileStoragePath] as? String
+                let contentType = rawFile[Field.projectFileContentType] as? String
+                let fileSize: Int?
+                if let intValue = rawFile[Field.projectFileSize] as? Int {
+                    fileSize = intValue
+                } else if let doubleValue = rawFile[Field.projectFileSize] as? Double {
+                    fileSize = Int(doubleValue)
+                } else {
+                    fileSize = nil
+                }
+                return ChatThread.Project.FileReference(
+                    id: id,
+                    name: name,
+                    url: url,
+                    storagePath: storagePath,
+                    contentType: contentType,
+                    fileSize: fileSize,
+                    uploadedAt: uploadedAtTimestamp.dateValue(),
+                    uploadedBy: uploader
+                )
+            }
+        } else {
+            files = []
+        }
+
+        return ChatThread.Project(
+            title: title,
+            summary: summary,
+            tasks: tasks,
+            files: files,
+            sharedDriveURL: sharedDriveURL,
+            allowsDownloads: allowsDownloads
+        )
     }
 
     private func decodeParticipant(_ data: [String: Any]) -> ChatParticipant? {
@@ -616,6 +820,8 @@ final class FirestoreChatService: ChatService {
             let createdAt = (data[Field.createdAt] as? Timestamp)?.dateValue() ?? Date()
             let imageURL = (data[Field.profileImageURL] as? String).flatMap(URL.init(string:))
             let detailsRaw = data[Field.profileDetails] as? [String: Any] ?? [:]
+            let drivePlanRaw = data[Field.drivePlan] as? String ?? UserProfile.DrivePlan.free.rawValue
+            let drivePlan = UserProfile.DrivePlan(rawValue: drivePlanRaw) ?? .free
             let rawProjects = decodeProfileSpotlights(detailsRaw[Field.upcomingProjects], defaultCategory: .project)
             let rawEvents = decodeProfileSpotlights(detailsRaw[Field.upcomingEvents], defaultCategory: .event)
             let details = AccountProfileDetails(
@@ -634,7 +840,8 @@ final class FirestoreChatService: ChatService {
                 accountType: accountType,
                 profileDetails: details,
                 contact: UserContactInfo(),
-                engineerSettings: EngineerSettings()
+                engineerSettings: EngineerSettings(),
+                drivePlan: drivePlan
             )
             return ChatParticipant(user: profile)
         case .studio:
@@ -825,6 +1032,8 @@ final class FirestoreChatService: ChatService {
         let accountType = AccountType(rawValue: accountTypeRaw) ?? .artist
         let imageURL = (data[Field.profileImageURL] as? String).flatMap(URL.init(string:))
         let detailsData = data[Field.profileDetails] as? [String: Any] ?? [:]
+        let drivePlanRaw = data[Field.drivePlan] as? String ?? UserProfile.DrivePlan.free.rawValue
+        let drivePlan = UserProfile.DrivePlan(rawValue: drivePlanRaw) ?? .free
         let rawProjects = decodeProfileSpotlights(detailsData[Field.upcomingProjects], defaultCategory: .project)
         let rawEvents = decodeProfileSpotlights(detailsData[Field.upcomingEvents], defaultCategory: .event)
         let details = AccountProfileDetails(
@@ -844,7 +1053,8 @@ final class FirestoreChatService: ChatService {
             accountType: accountType,
             profileDetails: details,
             contact: UserContactInfo(),
-            engineerSettings: EngineerSettings()
+            engineerSettings: EngineerSettings(),
+            drivePlan: drivePlan
         )
     }
 
