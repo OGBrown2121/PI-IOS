@@ -629,6 +629,24 @@ final class BookingInboxViewModel: ObservableObject {
             }
         }
 
+        let ownerIds = Set(
+            ownedStudios.map { $0.ownerId } +
+            studioIds.compactMap { studioDetails[$0]?.ownerId }
+        )
+        let missingOwnerIds = ownerIds.filter { userProfiles[$0] == nil && userNames[$0] == nil }
+        if missingOwnerIds.isEmpty == false {
+            do {
+                let profiles = try await firestore.fetchUserProfiles(for: Array(missingOwnerIds))
+                for profile in profiles {
+                    let name = profile.displayName.isEmpty ? profile.username : profile.displayName
+                    userNames[profile.id] = name
+                    userProfiles[profile.id] = profile
+                }
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+
         let missingRoomsByStudio = Dictionary(grouping: bookings.filter { roomNames[$0.roomId] == nil }) { $0.studioId }
 
         for (studioId, _) in missingRoomsByStudio {

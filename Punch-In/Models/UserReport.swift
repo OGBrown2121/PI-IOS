@@ -7,6 +7,7 @@ struct UserReport: Identifiable, Codable, Equatable {
     let reason: Reason
     var details: String
     let createdAt: Date
+    var evidencePhotoURLs: [URL]
 
     init(
         id: String = UUID().uuidString,
@@ -14,7 +15,8 @@ struct UserReport: Identifiable, Codable, Equatable {
         reporterUserId: String,
         reason: Reason,
         details: String = "",
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        evidencePhotoURLs: [URL] = []
     ) {
         self.id = id
         self.reportedUserId = reportedUserId
@@ -22,6 +24,7 @@ struct UserReport: Identifiable, Codable, Equatable {
         self.reason = reason
         self.details = details.trimmingCharacters(in: .whitespacesAndNewlines)
         self.createdAt = createdAt
+        self.evidencePhotoURLs = evidencePhotoURLs
     }
 }
 
@@ -84,6 +87,7 @@ extension UserReport {
         reportedUserId: "reported-user",
         reporterUserId: "reporter-user",
         reason: .spam,
-        details: "Received repeated unsolicited messages promoting unrelated services."
+        details: "Received repeated unsolicited messages promoting unrelated services.",
+        evidencePhotoURLs: [URL(string: "https://example.com/report/evidence.jpg")!]
     )
 }

@@ -709,6 +709,10 @@ struct FirebaseFirestoreService: FirestoreService {
             payload["details"] = report.details
         }
 
+        if report.evidencePhotoURLs.isEmpty == false {
+            payload["evidencePhotoURLs"] = report.evidencePhotoURLs.map { $0.absoluteString }
+        }
+
         payload["requiresFollowUp"] = report.reason.requiresDetails
 
         try await database

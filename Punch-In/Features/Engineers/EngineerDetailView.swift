@@ -156,6 +156,7 @@ struct EngineerDetailView: View {
                     viewModel: ReportUserViewModel(
                         reportedUser: profile,
                         reportService: di.reportService,
+                        storageService: di.storageService,
                         currentUserProvider: { appState.currentUser }
                     ),
                     onSubmitted: {

@@ -825,17 +825,19 @@ private struct BookingDetailSheet: View {
     private var participantsCard: some View {
         detailCard(title: "Participants") {
             VStack(alignment: .leading, spacing: 14) {
-                participantRow(
+                participantEntry(
                     icon: "person",
                     role: "Artist",
-                    name: viewModel.displayName(forUser: localBooking.artistId),
+                    userId: localBooking.artistId,
+                    profileType: .artist,
                     contact: viewModel.userProfile(for: localBooking.artistId)?.contact
                 )
 
-                participantRow(
+                participantEntry(
                     icon: "person.crop.rectangle",
                     role: "Engineer",
-                    name: viewModel.displayName(forUser: localBooking.engineerId),
+                    userId: localBooking.engineerId,
+                    profileType: .engineer,
                     contact: viewModel.userProfile(for: localBooking.engineerId)?.contact
                 )
 
@@ -916,6 +918,101 @@ private struct BookingDetailSheet: View {
             RoundedRectangle(cornerRadius: 22, style: .continuous)
                 .fill(Color(uiColor: .secondarySystemGroupedBackground))
         )
+    }
+
+    private enum ParticipantProfileType {
+        case artist
+        case engineer
+    }
+
+    @ViewBuilder
+    private func participantEntry(
+        icon: String,
+        role: String,
+        userId: String,
+        profileType: ParticipantProfileType? = nil,
+        subtitle: String? = nil,
+        contact: UserContactInfo? = nil
+    ) -> some View {
+        let name = viewModel.displayName(forUser: userId)
+        if let profile = viewModel.userProfile(for: userId) {
+            if profile.accountType.isEngineer || profileType == .engineer {
+                NavigationLink {
+                    EngineerDetailView(engineerId: profile.id, profile: profile)
+                } label: {
+                    participantRow(
+                        icon: icon,
+                        role: role,
+                        name: name,
+                        subtitle: subtitle,
+                        contact: contact
+                    )
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            } else if profile.accountType.isArtistFamily || profileType == .artist {
+                NavigationLink {
+                    ArtistDetailView(artistId: profile.id, profile: profile)
+                } label: {
+                    participantRow(
+                        icon: icon,
+                        role: role,
+                        name: name,
+                        subtitle: subtitle,
+                        contact: contact
+                    )
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            } else {
+                participantRow(
+                    icon: icon,
+                    role: role,
+                    name: name,
+                    subtitle: subtitle,
+                    contact: contact
+                )
+            }
+        } else if let profileType {
+            switch profileType {
+            case .engineer:
+                NavigationLink {
+                    EngineerDetailView(engineerId: userId)
+                } label: {
+                    participantRow(
+                        icon: icon,
+                        role: role,
+                        name: name,
+                        subtitle: subtitle,
+                        contact: contact
+                    )
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            case .artist:
+                NavigationLink {
+                    ArtistDetailView(artistId: userId)
+                } label: {
+                    participantRow(
+                        icon: icon,
+                        role: role,
+                        name: name,
+                        subtitle: subtitle,
+                        contact: contact
+                    )
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        } else {
+            participantRow(
+                icon: icon,
+                role: role,
+                name: name,
+                subtitle: subtitle,
+                contact: contact
+            )
+        }
     }
 
     private func participantRow(
