@@ -84,7 +84,7 @@ enum ProfileOptions {
         "Animation / Motion"
     ]
 
-    static let podcastTopics: [String] = [
+    static let contentStudioFormats: [String] = [
         "Music Industry News",
         "Artist Interviews",
         "DJ Culture",
@@ -97,5 +97,50 @@ enum ProfileOptions {
         "Culture & Commentary",
         "Education",
         "Wellness & Mindset"
+    ]
+
+    static let designerStyles: [String] = [
+        "Streetwear",
+        "Luxury",
+        "Capsule Collections",
+        "Athleisure",
+        "Runway",
+        "Graphic Merch",
+        "Accessories",
+        "Collaborations",
+        "Custom Pieces",
+        "Sustainable",
+        "Avant Garde",
+        "Limited Drops"
+    ]
+
+    static let modelingSpecialties: [String] = [
+        "Music Videos",
+        "Commercial",
+        "Runway",
+        "Editorial",
+        "Event Appearances",
+        "Brand Ambassador",
+        "Social Campaigns",
+        "Product Features",
+        "Choreography",
+        "Lifestyle",
+        "Print",
+        "Catalog"
+    ]
+
+    static let journalistBeats: [String] = [
+        "Music Business",
+        "Artist Profiles",
+        "Release Spotlights",
+        "Live Reviews",
+        "Community Stories",
+        "Culture Commentary",
+        "Breaking News",
+        "Industry Analysis",
+        "Event Reporting",
+        "Behind the Scenes",
+        "Technology",
+        "Opinion Pieces"
     ]
 }

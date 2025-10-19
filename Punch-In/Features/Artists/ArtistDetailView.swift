@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct ArtistDetailView: View {
     @Environment(\.di) private var di
@@ -38,8 +39,9 @@ struct ArtistDetailView: View {
     @State private var beatDownloadManagementMessageTask: Task<Void, Never>?
     @State private var presentedFollowList: FollowConnectionsKind?
     @State private var isShowingReportSheet = false
-    @State private var reportToastMessage: String?
-    @State private var reportToastTask: Task<Void, Never>?
+    @State private var contactContext: ContactActionContext?
+    @State private var toastMessage: String?
+    @State private var toastTask: Task<Void, Never>?
 
     init(artistId: String, profile: UserProfile? = nil, heroStyle: HeroStyle = .standard) {
         self.artistId = artistId
@@ -53,32 +55,39 @@ struct ArtistDetailView: View {
                 ScrollView(.vertical, showsIndicators: false) {
                     VStack(alignment: .leading, spacing: Theme.spacingLarge) {
                         heroSection(for: profile)
+                        if let action = profile.accountType.contactAction, shouldShowBookingAction(for: profile) {
+                            bookingSection(for: profile, action: action)
+                        }
                         if profile.accountType == .producer {
                             beatCatalogSection(for: profile)
                         }
                         if profile.accountType.supportsProfileMediaLibrary {
                             mediaSection(for: profile)
                         }
-                        if activeProjects(for: profile).isEmpty == false {
-                            ProfileSpotlightSection(
-                                title: "Pinned Projects",
-                                icon: "hammer",
-                                spotlights: activeProjects(for: profile),
-                                accentColor: Theme.primaryColor
-                            )
+                        if profile.accountType.isPrivateProfile {
+                            privateProfileNotice(for: profile)
+                        } else {
+                            if activeProjects(for: profile).isEmpty == false {
+                                ProfileSpotlightSection(
+                                    title: "Pinned Projects",
+                                    icon: "hammer",
+                                    spotlights: activeProjects(for: profile),
+                                    accentColor: Theme.primaryColor
+                                )
+                            }
+                            if activeEvents(for: profile).isEmpty == false {
+                                ProfileSpotlightSection(
+                                    title: "Upcoming Events",
+                                    icon: "calendar",
+                                    spotlights: activeEvents(for: profile),
+                                    accentColor: Color.purple
+                                )
+                            }
+                            creativeSection(for: profile)
+                            detailsSection(for: profile)
+                            reviewsSection
+                            collaborationSection(for: profile)
                         }
-                        if activeEvents(for: profile).isEmpty == false {
-                            ProfileSpotlightSection(
-                                title: "Upcoming Events",
-                                icon: "calendar",
-                                spotlights: activeEvents(for: profile),
-                                accentColor: Color.purple
-                            )
-                        }
-                        creativeSection(for: profile)
-                        detailsSection(for: profile)
-                        reviewsSection
-                        collaborationSection(for: profile)
                     }
                     .padding(Theme.spacingLarge)
                 }
@@ -151,7 +160,7 @@ struct ArtistDetailView: View {
                         currentUserProvider: { appState.currentUser }
                     ),
                     onSubmitted: {
-                        showReportToast("Thanks for letting us know.")
+                        showToast("Thanks for letting us know.")
                     }
                 )
             } else {
@@ -159,10 +168,22 @@ struct ArtistDetailView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .toast(message: $reportToastMessage, bottomInset: 120)
+        .sheet(item: $contactContext) { context in
+            ProfileContactSheet(
+                context: context,
+                openURLAction: openURL,
+                onCopy: { copiedValue in
+                    showToast("\(copiedValue) copied to clipboard")
+                },
+                onUnavailable: {
+                    showToast("No direct contact info has been shared yet.")
+                }
+            )
+        }
+        .toast(message: $toastMessage, bottomInset: 120)
         .onDisappear {
-            reportToastTask?.cancel()
-            reportToastTask = nil
+            toastTask?.cancel()
+            toastTask = nil
             beatDownloadManagementMessageTask?.cancel()
             beatDownloadManagementMessageTask = nil
         }
@@ -214,6 +235,9 @@ struct ArtistDetailView: View {
 
         return VStack(spacing: Theme.spacingSmall * 0.6) {
             avatar(for: profile)
+                .overlay(alignment: .bottomTrailing) {
+                    heroBadge(for: profile.accountType)
+                }
                 .padding(.bottom, Theme.spacingSmall * 0.6)
 
             Text(profile.accountType.title.uppercased())
@@ -302,6 +326,25 @@ struct ArtistDetailView: View {
         }
     }
 
+    private func bookingSection(for profile: UserProfile, action: AccountType.ContactAction) -> some View {
+        sectionCard(title: action.cardTitle, icon: action.cardIcon) {
+            VStack(alignment: .leading, spacing: Theme.spacingMedium) {
+                Text(action.sheetMessage)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
+                PrimaryButton(title: action.buttonTitle) {
+                    contactContext = ContactActionContext(action: action, profile: profile)
+                }
+            }
+        }
+    }
+
+    private func shouldShowBookingAction(for profile: UserProfile) -> Bool {
+        guard let currentUser = appState.currentUser else { return true }
+        return currentUser.id != profile.id
+    }
+
     private func mediaAccentColor(for accountType: AccountType) -> Color {
         switch accountType {
         case .dj:
@@ -312,6 +355,14 @@ struct ArtistDetailView: View {
             return Color.blue
         case .podcast:
             return Color.mint
+        case .designer:
+            return Color.pink
+        case .videoVixen:
+            return Color.red.opacity(0.85)
+        case .journalist:
+            return Color.teal
+        case .eventCenter:
+            return Color.indigo
         default:
             return Theme.primaryColor
         }
@@ -716,6 +767,14 @@ struct ArtistDetailView: View {
         }
     }
 
+    private func privateProfileNotice(for profile: UserProfile) -> some View {
+        sectionCard(title: "Private scouting", icon: "lock.fill") {
+            Text("This \(profile.accountType.title) keeps most details private. Follow to stay on their radar or use the contact button above to introduce your project.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+    }
+
     private var reviewsSection: some View {
         VStack(alignment: .leading, spacing: Theme.spacingSmall) {
             Label("Reviews", systemImage: "star.circle.fill")
@@ -880,6 +939,21 @@ struct ArtistDetailView: View {
         }
     }
 
+    @ViewBuilder
+    private func heroBadge(for accountType: AccountType) -> some View {
+        if let symbol = accountType.heroBadgeSystemImage {
+            ZStack {
+                Circle()
+                    .fill(Color.yellow.opacity(0.9))
+                Image(systemName: symbol)
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(Color.white)
+            }
+            .frame(width: 26, height: 26)
+            .shadow(color: Color.black.opacity(0.2), radius: 4, y: 2)
+        }
+    }
+
     private func loadReviews() async {
         guard isLoadingReviews == false else { return }
         isLoadingReviews = true
@@ -943,6 +1017,118 @@ struct ArtistDetailView: View {
                 .stroke(Theme.primaryColor.opacity(0.12), lineWidth: 1)
         )
         .shadow(color: Color.black.opacity(0.12), radius: 18, x: 0, y: 10)
+    }
+
+    private struct ContactActionContext: Identifiable {
+        let id = UUID()
+        let action: AccountType.ContactAction
+        let profile: UserProfile
+    }
+
+    private struct ProfileContactSheet: View {
+        @Environment(\.dismiss) private var dismiss
+        let context: ContactActionContext
+        let openURLAction: OpenURLAction
+        let onCopy: (String) -> Void
+        let onUnavailable: () -> Void
+
+        var body: some View {
+            NavigationStack {
+                List {
+                    Section("Details") {
+                        Text(context.action.sheetMessage)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Section("Contact") {
+                        if contactMethods.isEmpty {
+                            Text("This profile hasn’t shared direct contact info yet.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ForEach(contactMethods, id: \.self) { method in
+                                switch method {
+                                case .email(let value):
+                                    Button {
+                                        openEmail(value)
+                                    } label: {
+                                        Label("Email", systemImage: "envelope.fill")
+                                    }
+                                    Button {
+                                        copyToClipboard(value, description: "Email address")
+                                    } label: {
+                                        Label("Copy email", systemImage: "doc.on.doc")
+                                    }
+                                case .phone(let value):
+                                    Button {
+                                        callNumber(value)
+                                    } label: {
+                                        Label("Call", systemImage: "phone.fill")
+                                    }
+                                    Button {
+                                        copyToClipboard(value, description: "Phone number")
+                                    } label: {
+                                        Label("Copy phone", systemImage: "doc.on.doc")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                .navigationTitle(context.action.sheetTitle)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Done") { dismiss() }
+                    }
+                }
+                .onAppear {
+                    if contactMethods.isEmpty {
+                        onUnavailable()
+                    }
+                }
+            }
+        }
+
+        private enum ContactMethod: Hashable {
+            case email(String)
+            case phone(String)
+        }
+
+        private var contactMethods: [ContactMethod] {
+            var methods: [ContactMethod] = []
+            let contact = context.profile.contact
+            let trimmedEmail = contact.email.trimmed
+            if trimmedEmail.isEmpty == false {
+                methods.append(.email(trimmedEmail))
+            }
+            let trimmedPhone = contact.phoneNumber.trimmed
+            if trimmedPhone.isEmpty == false {
+                methods.append(.phone(trimmedPhone))
+            }
+            return methods
+        }
+
+        private func openEmail(_ address: String) {
+            guard let url = URL(string: "mailto:\(address)") else { return }
+            openURLAction(url)
+            dismiss()
+        }
+
+        private func callNumber(_ number: String) {
+            let digits = number.trimmingCharacters(in: .whitespaces)
+            guard let url = URL(string: "tel:\(digits)") else { return }
+            openURLAction(url)
+            dismiss()
+        }
+
+        private func copyToClipboard(_ value: String, description: String) {
+            #if canImport(UIKit)
+            UIPasteboard.general.string = value
+            #endif
+            onCopy(description)
+        }
     }
 
     private func profileDetailRow(label: String, value: String) -> some View {
@@ -1209,7 +1395,7 @@ struct ArtistDetailView: View {
             try await di.firestoreService.submitBeatDownloadRequest(request)
             beatDownloadErrorMessage = nil
             beatDownloadSuccessMessage = "Request sent! We'll notify you once the producer shares the files."
-            showReportToast("We’ll notify you once the producer shares the files.")
+            showToast("We’ll notify you once the producer shares the files.")
             return true
         } catch {
             beatDownloadErrorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
@@ -1218,13 +1404,13 @@ struct ArtistDetailView: View {
     }
 
     @MainActor
-    private func showReportToast(_ message: String) {
-        reportToastTask?.cancel()
-        withAnimation { reportToastMessage = message }
-        reportToastTask = Task {
+    private func showToast(_ message: String) {
+        toastTask?.cancel()
+        withAnimation { toastMessage = message }
+        toastTask = Task {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             await MainActor.run {
-                withAnimation { reportToastMessage = nil }
+                withAnimation { toastMessage = nil }
             }
         }
     }

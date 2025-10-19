@@ -336,8 +336,32 @@ struct ProfileMediaCapabilities: Equatable {
                 allowedFormats: [.audio, .video],
                 defaultCategories: [.podcast, .video],
                 pinLimit: 3,
-                pinnedSectionTitle: "Pinned Episodes",
-                pinnedEmptyState: "Pin anchor podcast episodes for new listeners."
+                pinnedSectionTitle: "Pinned Sessions",
+                pinnedEmptyState: "Pin standout recordings or livestreams for creators to preview."
+            )
+        case .designer:
+            return ProfileMediaCapabilities(
+                allowedFormats: [.photo, .gallery, .video],
+                defaultCategories: [.showcase, .photo, .video],
+                pinLimit: 6,
+                pinnedSectionTitle: "Featured Drops",
+                pinnedEmptyState: "Pin lookbooks or runway clips from your latest collection."
+            )
+        case .videoVixen:
+            return ProfileMediaCapabilities(
+                allowedFormats: [.photo, .video],
+                defaultCategories: [.showcase, .video, .photo],
+                pinLimit: 6,
+                pinnedSectionTitle: "Featured Appearances",
+                pinnedEmptyState: "Pin music videos or campaign shots you're proud of."
+            )
+        case .journalist:
+            return ProfileMediaCapabilities(
+                allowedFormats: [.video, .photo],
+                defaultCategories: [.video, .showcase, .photo],
+                pinLimit: 5,
+                pinnedSectionTitle: "Featured Stories",
+                pinnedEmptyState: "Pin interviews or coverage reels to highlight your reporting."
             )
         case .studioOwner, .eventCenter:
             return ProfileMediaCapabilities(
@@ -346,6 +370,14 @@ struct ProfileMediaCapabilities: Equatable {
                 pinLimit: 6,
                 pinnedSectionTitle: "Venue Highlights",
                 pinnedEmptyState: "Pin marquee rooms, stages, or walkthroughs."
+            )
+        case .anr:
+            return ProfileMediaCapabilities(
+                allowedFormats: [],
+                defaultCategories: [],
+                pinLimit: 0,
+                pinnedSectionTitle: "",
+                pinnedEmptyState: ""
             )
         }
     }

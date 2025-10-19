@@ -325,6 +325,14 @@ struct OnboardingView: View {
         VStack(alignment: .leading, spacing: Theme.spacingLarge) {
             if viewModel.selectedAccountType.usesPrimaryOptions {
                 primaryOptionsSelector
+            } else {
+                VStack(alignment: .leading, spacing: Theme.spacingSmall) {
+                    Text(viewModel.fieldOneLabel)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color.white.opacity(0.9))
+                    TextField(viewModel.fieldOneLabel, text: $viewModel.fieldOne)
+                        .textFieldStyle(.roundedBorder)
+                }
             }
 
             VStack(alignment: .leading, spacing: Theme.spacingSmall) {
@@ -333,6 +341,10 @@ struct OnboardingView: View {
                     .foregroundStyle(Color.white.opacity(0.9))
                 TextField(viewModel.fieldTwoLabel, text: $viewModel.fieldTwo)
                     .textFieldStyle(.roundedBorder)
+            }
+
+            if viewModel.requiresAgeVerification {
+                ageVerificationSection
             }
         }
     }
@@ -363,6 +375,22 @@ struct OnboardingView: View {
                 .foregroundStyle(Color.white.opacity(0.9))
             TextField("Tell the community about yourself", text: $viewModel.publicBio, axis: .vertical)
                 .textFieldStyle(.roundedBorder)
+        }
+    }
+
+    private var ageVerificationSection: some View {
+        VStack(alignment: .leading, spacing: Theme.spacingSmall) {
+            Toggle(isOn: $viewModel.isAgeVerified) {
+                Text("I confirm that I am at least 18 years old.")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color.white.opacity(0.9))
+            }
+            .toggleStyle(.switch)
+            .tint(Theme.primaryGradientEnd)
+
+            Text("Modeling profiles must be 18 or older. This acknowledgment is required to publish your page.")
+                .font(.footnote)
+                .foregroundStyle(Color.white.opacity(0.75))
         }
     }
 

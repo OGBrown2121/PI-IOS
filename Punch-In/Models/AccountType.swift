@@ -10,6 +10,10 @@ enum AccountType: String, CaseIterable, Identifiable, Codable, Equatable {
     case videographer
     case eventCenter
     case podcast
+    case designer
+    case videoVixen
+    case journalist
+    case anr
 
     static var allCases: [AccountType] {
         [
@@ -18,10 +22,14 @@ enum AccountType: String, CaseIterable, Identifiable, Codable, Equatable {
             .dj,
             .photographer,
             .videographer,
+            .videoVixen,
+            .journalist,
+            .designer,
             .podcast,
             .engineer,
             .studioOwner,
-            .eventCenter
+            .eventCenter,
+            .anr
         ]
     }
 
@@ -35,8 +43,11 @@ enum AccountType: String, CaseIterable, Identifiable, Codable, Equatable {
         case djStyles
         case photographySpecialties
         case videographySpecialties
-        case podcastTopics
+        case contentStudioFormats
         case productionStyles
+        case designerStyles
+        case modelingSpecialties
+        case journalistBeats
     }
 
     var id: String { rawValue }
@@ -51,7 +62,11 @@ enum AccountType: String, CaseIterable, Identifiable, Codable, Equatable {
         case .photographer: return "Photographer"
         case .videographer: return "Videographer"
         case .eventCenter: return "Live Event Center"
-        case .podcast: return "Podcast"
+        case .podcast: return "Content Studio"
+        case .designer: return "Designer"
+        case .videoVixen: return "Model"
+        case .journalist: return "Journalist"
+        case .anr: return "A&R"
         }
     }
 
@@ -74,7 +89,15 @@ enum AccountType: String, CaseIterable, Identifiable, Codable, Equatable {
         case .eventCenter:
             return "Promote your venue, list upcoming shows, and gather RSVPs."
         case .podcast:
-            return "Present your show lineup and connect with new listeners."
+            return "Present your studio offerings and connect with creators."
+        case .designer:
+            return "Share your latest drops and invite bids on exclusive pieces."
+        case .videoVixen:
+            return "Spotlight your appearances and land new bookings."
+        case .journalist:
+            return "Showcase recent stories and request new interviews."
+        case .anr:
+            return "Discover emerging talent while keeping your scouting private."
         }
     }
 
@@ -97,7 +120,15 @@ enum AccountType: String, CaseIterable, Identifiable, Codable, Equatable {
         case .eventCenter:
             return ["Venue name", "Venue location"]
         case .podcast:
-            return ["Show topics", "Format or cadence"]
+            return ["Studio focus", "Session format"]
+        case .designer:
+            return ["Design specialties", "Collection highlight"]
+        case .videoVixen:
+            return ["Modeling specialties", "Recent appearance or client"]
+        case .journalist:
+            return ["Primary beat", "Recent feature or outlet"]
+        case .anr:
+            return ["Label or company", "Talent focus"]
         }
     }
 
@@ -111,7 +142,7 @@ enum AccountType: String, CaseIterable, Identifiable, Codable, Equatable {
     }
 
     var usesPrimaryOptions: Bool {
-        profileFieldStyle == .specialties
+        profileFieldStyle == .specialties && primaryOptionsCategory != nil
     }
 
     var primaryOptionsCategory: PrimaryOptionsCategory? {
@@ -127,10 +158,16 @@ enum AccountType: String, CaseIterable, Identifiable, Codable, Equatable {
         case .videographer:
             return .videographySpecialties
         case .podcast:
-            return .podcastTopics
+            return .contentStudioFormats
         case .engineer:
             return .genres
-        case .studioOwner, .eventCenter:
+        case .designer:
+            return .designerStyles
+        case .videoVixen:
+            return .modelingSpecialties
+        case .journalist:
+            return .journalistBeats
+        case .studioOwner, .eventCenter, .anr:
             return nil
         }
     }
@@ -148,10 +185,16 @@ enum AccountType: String, CaseIterable, Identifiable, Codable, Equatable {
         case .videographer:
             return "Select Videography Specialties"
         case .podcast:
-            return "Select Show Topics"
+            return "Select Studio Offerings"
         case .engineer:
             return "Select Specialties"
-        case .studioOwner, .eventCenter:
+        case .designer:
+            return "Select Design Styles"
+        case .videoVixen:
+            return "Select Modeling Specialties"
+        case .journalist:
+            return "Select Coverage Beats"
+        case .studioOwner, .eventCenter, .anr:
             return "Select Options"
         }
     }
@@ -162,7 +205,7 @@ enum AccountType: String, CaseIterable, Identifiable, Codable, Equatable {
 
     var isArtistFamily: Bool {
         switch self {
-        case .artist, .producer, .dj, .photographer, .videographer, .podcast:
+        case .artist, .producer, .dj, .photographer, .videographer, .podcast, .designer, .videoVixen, .journalist:
             return true
         default:
             return false
@@ -179,6 +222,98 @@ enum AccountType: String, CaseIterable, Identifiable, Codable, Equatable {
 
     var canInitiateBookings: Bool {
         isArtistFamily || self == .eventCenter
+    }
+
+    var requiresAgeVerification: Bool { self == .videoVixen }
+
+    var isPrivateProfile: Bool { self == .anr }
+
+    struct ContactAction {
+        let cardTitle: String
+        let cardIcon: String
+        let buttonTitle: String
+        let sheetTitle: String
+        let sheetMessage: String
+    }
+
+    var contactAction: ContactAction? {
+        switch self {
+        case .dj:
+            return ContactAction(
+                cardTitle: "Book this DJ",
+                cardIcon: "music.note",
+                buttonTitle: "Book This DJ",
+                sheetTitle: "Connect with this DJ",
+                sheetMessage: "Share your event date, location, and vibe so they can confirm availability."
+            )
+        case .photographer:
+            return ContactAction(
+                cardTitle: "Book this Photographer",
+                cardIcon: "camera.fill",
+                buttonTitle: "Book This Photographer",
+                sheetTitle: "Request a shoot",
+                sheetMessage: "Provide shoot details like location, time, and creative direction."
+            )
+        case .videographer:
+            return ContactAction(
+                cardTitle: "Book this Videographer",
+                cardIcon: "video.fill",
+                buttonTitle: "Book This Videographer",
+                sheetTitle: "Start a video project",
+                sheetMessage: "Let them know the concept, timeline, and deliverables you're expecting."
+            )
+        case .eventCenter:
+            return ContactAction(
+                cardTitle: "Request this Venue",
+                cardIcon: "building.2.fill",
+                buttonTitle: "Request This Venue",
+                sheetTitle: "Request a venue booking",
+                sheetMessage: "Include your event size, preferred dates, and production needs."
+            )
+        case .podcast:
+            return ContactAction(
+                cardTitle: "Request this Content Studio",
+                cardIcon: "mic.fill",
+                buttonTitle: "Request This Content Studio",
+                sheetTitle: "Request studio time",
+                sheetMessage: "Share the type of content you're producing and when you'd like to record."
+            )
+        case .designer:
+            return ContactAction(
+                cardTitle: "Place a Bid",
+                cardIcon: "tag.fill",
+                buttonTitle: "Place a Bid",
+                sheetTitle: "Bid on this collection",
+                sheetMessage: "Send your offer, sizing, and any customization requests."
+            )
+        case .videoVixen:
+            return ContactAction(
+                cardTitle: "Request this Model",
+                cardIcon: "sparkles",
+                buttonTitle: "Request This Model",
+                sheetTitle: "Request a booking",
+                sheetMessage: "Share project details, shoot timing, and compensation to start the conversation."
+            )
+        case .journalist:
+            return ContactAction(
+                cardTitle: "Request coverage",
+                cardIcon: "newspaper.fill",
+                buttonTitle: "Request an Interview",
+                sheetTitle: "Pitch your story",
+                sheetMessage: "Provide your angle, timing, and any materials to help them prep."
+            )
+        default:
+            return nil
+        }
+    }
+
+    var heroBadgeSystemImage: String? {
+        switch self {
+        case .anr:
+            return "seal.fill"
+        default:
+            return nil
+        }
     }
 }
 

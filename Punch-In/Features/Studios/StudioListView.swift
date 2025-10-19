@@ -486,7 +486,11 @@ private enum DiscoveryCategory: String, CaseIterable, Identifiable, Hashable {
     case videographers
     case photographers
     case eventCenters
-    case podcasts
+    case designers
+    case models
+    case journalists
+    case anrs
+    case contentStudios
 
     var id: Self { self }
 
@@ -499,7 +503,11 @@ private enum DiscoveryCategory: String, CaseIterable, Identifiable, Hashable {
         case .videographers: return "Videographers"
         case .photographers: return "Photographers"
         case .eventCenters: return "Event Centers"
-        case .podcasts: return "Podcasts"
+        case .designers: return "Designers"
+        case .models: return "Models"
+        case .journalists: return "Journalists"
+        case .anrs: return "A&Rs"
+        case .contentStudios: return "Content Studios"
         }
     }
 
@@ -512,7 +520,11 @@ private enum DiscoveryCategory: String, CaseIterable, Identifiable, Hashable {
         case .videographers: return "video.fill"
         case .photographers: return "camera.fill"
         case .eventCenters: return "building.2.fill"
-        case .podcasts: return "mic.fill"
+        case .designers: return "tag.fill"
+        case .models: return "sparkles"
+        case .journalists: return "newspaper.fill"
+        case .anrs: return "rosette"
+        case .contentStudios: return "mic.fill"
         }
     }
 
@@ -525,7 +537,11 @@ private enum DiscoveryCategory: String, CaseIterable, Identifiable, Hashable {
         case .videographers: return "Videographer showcase"
         case .photographers: return "Photographer showcase"
         case .eventCenters: return "Event centers"
-        case .podcasts: return "Podcast studios"
+        case .designers: return "Designer marketplace"
+        case .models: return "Model showcase"
+        case .journalists: return "Journalist hub"
+        case .anrs: return "A&R network"
+        case .contentStudios: return "Content studios"
         }
     }
 
@@ -545,8 +561,16 @@ private enum DiscoveryCategory: String, CaseIterable, Identifiable, Hashable {
             return "Photographers are almost here. We’ll showcase creatives available to shoot."
         case .eventCenters:
             return "Find event-friendly spaces and venues once this hub goes live."
-        case .podcasts:
-            return "Podcast studios and hosts will appear here as we expand discovery."
+        case .designers:
+            return "Discover designers and merch drops as we build this marketplace."
+        case .models:
+            return "Model bookings launch soon. You'll be able to browse featured talent here."
+        case .journalists:
+            return "We're curating music journalists ready for interviews and coverage."
+        case .anrs:
+            return "A&R spotlights are private. We'll highlight trusted scouts in this lane soon."
+        case .contentStudios:
+            return "Content studios and hosts will appear here as we expand discovery."
         }
     }
 

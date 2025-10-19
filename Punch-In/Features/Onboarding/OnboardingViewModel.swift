@@ -31,6 +31,16 @@ final class OnboardingViewModel: ObservableObject {
             if selectedAccountType.profileFieldStyle != .location && !selectedAccountType.usesPrimaryOptions {
                 selectedPrimaryOptions = []
             }
+
+            if selectedAccountType.requiresAgeVerification {
+                if let currentProfile = appState.currentUser, currentProfile.accountType == selectedAccountType {
+                    isAgeVerified = true
+                } else {
+                    isAgeVerified = false
+                }
+            } else {
+                isAgeVerified = true
+            }
         }
     }
     @Published var fieldOne: String = ""
@@ -41,6 +51,7 @@ final class OnboardingViewModel: ObservableObject {
     @Published var didSave = false
     @Published var upcomingProjects: [ProfileSpotlight] = []
     @Published var upcomingEvents: [ProfileSpotlight] = []
+    @Published var isAgeVerified: Bool = true
     @Published var selectedPrimaryOptions: [String] = [] {
         didSet {
             if selectedAccountType.usesPrimaryOptions {
@@ -74,27 +85,50 @@ final class OnboardingViewModel: ObservableObject {
         }
 
         syncPrimaryOptionsFromStoredValue()
+
+        if selectedAccountType.requiresAgeVerification {
+            if let profile = appState.currentUser, profile.accountType == selectedAccountType {
+                isAgeVerified = true
+            } else {
+                isAgeVerified = false
+            }
+        } else {
+            isAgeVerified = true
+        }
     }
 
     var fieldOneLabel: String { selectedAccountType.requiredFieldLabels.first ?? "Details" }
     var fieldTwoLabel: String { selectedAccountType.requiredFieldLabels.last ?? "More details" }
+    var requiresAgeVerification: Bool { selectedAccountType.requiresAgeVerification }
 
     var isContinueEnabled: Bool {
         let trimmedUsername = username.trimmed
         let trimmedFieldTwo = fieldTwo.trimmed
         let trimmedBio = publicBio.trimmed
+        let meetsAgeRequirement = !selectedAccountType.requiresAgeVerification || isAgeVerified
         switch selectedAccountType.profileFieldStyle {
         case .location:
             let trimmedFieldOne = fieldOne.trimmed
-            return !trimmedUsername.isEmpty && !trimmedFieldOne.isEmpty && !trimmedFieldTwo.isEmpty && !trimmedBio.isEmpty
+            return !trimmedUsername.isEmpty && !trimmedFieldOne.isEmpty && !trimmedFieldTwo.isEmpty && !trimmedBio.isEmpty && meetsAgeRequirement
         case .specialties:
-            return !trimmedUsername.isEmpty && !selectedPrimaryOptions.isEmpty && !trimmedFieldTwo.isEmpty && !trimmedBio.isEmpty
+            let hasPrimaryValue: Bool
+            if selectedAccountType.usesPrimaryOptions {
+                hasPrimaryValue = !selectedPrimaryOptions.isEmpty
+            } else {
+                hasPrimaryValue = !fieldOne.trimmed.isEmpty
+            }
+            return !trimmedUsername.isEmpty && hasPrimaryValue && !trimmedFieldTwo.isEmpty && !trimmedBio.isEmpty && meetsAgeRequirement
         }
     }
 
     func saveProfile(profileImageData: Data?, profileImageContentType: String, removeProfileImage: Bool) async {
         guard isContinueEnabled else { return }
         guard let existingProfile = appState.currentUser else { return }
+
+        if selectedAccountType.requiresAgeVerification && isAgeVerified == false {
+            errorMessage = "You must confirm you are 18 or older to continue."
+            return
+        }
 
         if let data = profileImageData, data.count >= 8 * 1024 * 1024 {
             errorMessage = "Profile image must be smaller than 8 MB."
@@ -184,10 +218,16 @@ final class OnboardingViewModel: ObservableObject {
             return ProfileOptions.photographySpecialties
         case .videographySpecialties:
             return ProfileOptions.videographySpecialties
-        case .podcastTopics:
-            return ProfileOptions.podcastTopics
+        case .contentStudioFormats:
+            return ProfileOptions.contentStudioFormats
         case .productionStyles:
             return ProfileOptions.productionStyles
+        case .designerStyles:
+            return ProfileOptions.designerStyles
+        case .modelingSpecialties:
+            return ProfileOptions.modelingSpecialties
+        case .journalistBeats:
+            return ProfileOptions.journalistBeats
         }
     }
 
