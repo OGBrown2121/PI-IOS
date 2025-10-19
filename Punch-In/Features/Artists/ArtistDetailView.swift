@@ -233,58 +233,66 @@ struct ArtistDetailView: View {
     private func heroSection(for profile: UserProfile) -> some View {
         let metrics = heroStyle.metrics
 
-        return VStack(spacing: Theme.spacingSmall * 0.6) {
-            avatar(for: profile)
-                .overlay(alignment: .bottomTrailing) {
-                    heroBadge(for: profile.accountType)
+        return VStack(alignment: .leading, spacing: Theme.spacingSmall * 1.2) {
+            HStack(alignment: .center, spacing: Theme.spacingMedium) {
+                avatar(for: profile)
+                    .overlay(alignment: .bottomTrailing) {
+                        heroBadge(for: profile.accountType)
+                    }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(profile.accountType.title.uppercased())
+                        .font(.caption2.weight(.heavy))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(
+                            Capsule()
+                                .fill(Theme.primaryColor.opacity(0.12))
+                        )
+                        .overlay(
+                            Capsule()
+                                .stroke(Theme.primaryColor.opacity(0.3), lineWidth: 1)
+                        )
+                        .foregroundStyle(Theme.primaryColor)
+
+                    Text(profile.displayName.isEmpty ? profile.username : profile.displayName)
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(.primary)
+
+                    Text("@\(profile.username)")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
                 }
-                .padding(.bottom, Theme.spacingSmall * 0.6)
 
-            Text(profile.accountType.title.uppercased())
-                .font(.caption2.weight(.heavy))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 4)
-                .background(
-                    Capsule()
-                        .fill(Color.white.opacity(0.15))
-                )
-                .overlay(
-                    Capsule()
-                        .stroke(Color.white.opacity(0.25), lineWidth: 1)
-                )
+                Spacer(minLength: 12)
 
-            Text(profile.displayName.isEmpty ? profile.username : profile.displayName)
-                .font(.title3.weight(.heavy))
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.white)
-
-            Text("@\(profile.username)")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.white.opacity(0.85))
+                if shouldShowFollowButton(for: profile) {
+                    followActionButton(for: profile)
+                }
+            }
 
             if !profile.profileDetails.bio.isEmpty {
                 Text(profile.profileDetails.bio)
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.9))
-                    .multilineTextAlignment(.center)
-                    .padding(.top, Theme.spacingSmall * 0.5)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
             }
 
             followSummarySection(for: profile)
         }
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, metrics.horizontalPadding)
-        .padding(.vertical, metrics.verticalPadding)
+        .padding(.vertical, Theme.spacingMedium)
         .background(
             RoundedRectangle(cornerRadius: metrics.cardCornerRadius, style: .continuous)
-                .fill(heroGradient)
+                .fill(Theme.cardBackground)
         )
         .overlay(
             RoundedRectangle(cornerRadius: metrics.cardCornerRadius, style: .continuous)
-                .stroke(.white.opacity(0.15), lineWidth: 1)
+                .stroke(Theme.primaryColor.opacity(0.08), lineWidth: 1)
         )
         .shadow(
-            color: Theme.primaryColor.opacity(0.18),
+            color: Color.black.opacity(0.1),
             radius: metrics.shadowRadius,
             x: 0,
             y: metrics.shadowYOffset
@@ -305,20 +313,13 @@ struct ArtistDetailView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } else {
-                let pinned = mediaItems.filter { $0.isPinned }
-
-                if pinned.isEmpty == false {
-                    ProfileMediaShowcaseSection(
-                        title: profile.mediaCapabilities.pinnedSectionTitle,
-                        icon: "star.fill",
-                        accentColor: mediaAccentColor(for: profile.accountType),
-                        items: pinned
-                    )
-                } else {
-                    Text("Pin uploads from your settings to highlight them here.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
+                ProfileMediaGallerySection(
+                    title: profile.mediaCapabilities.pinnedSectionTitle,
+                    icon: "sparkles",
+                    accentColor: mediaAccentColor(for: profile.accountType),
+                    items: mediaItems,
+                    capabilities: profile.mediaCapabilities
+                )
             }
         }
         .task {
@@ -645,79 +646,85 @@ struct ArtistDetailView: View {
     }
 
     private func followSummarySection(for profile: UserProfile) -> some View {
-        VStack(spacing: Theme.spacingSmall * CGFloat(0.9)) {
+        VStack(alignment: .leading, spacing: Theme.spacingSmall * 0.75) {
             if isLoadingFollowStats {
                 ProgressView()
                     .progressViewStyle(.circular)
-                    .tint(.white)
+                    .tint(Theme.primaryColor)
             } else {
-                HStack(spacing: Theme.spacingMedium) {
+                HStack(alignment: .center, spacing: Theme.spacingLarge) {
                     followMetricButton(
                         count: followStats.followersCount,
                         label: followersLabel,
                         kind: .followers
                     )
+
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.12))
+                        .frame(width: 1, height: 24)
+
                     followMetricButton(
                         count: followStats.followingCount,
                         label: "Following",
                         kind: .following
                     )
                 }
-            }
-
-            if shouldShowFollowButton(for: profile) {
-                Button {
-                    Task { await handleFollowTap(for: profile) }
-                } label: {
-                    ZStack {
-                        HStack(spacing: 8) {
-                            Image(systemName: followStats.isFollowing ? "checkmark" : "person.badge.plus")
-                                .font(.subheadline.weight(.semibold))
-                            Text(followStats.isFollowing ? "Following" : "Follow")
-                                .font(.subheadline.weight(.semibold))
-                        }
-                        .opacity(isUpdatingFollow ? 0 : 1)
-
-                        if isUpdatingFollow {
-                            ProgressView()
-                                .progressViewStyle(.circular)
-                                .tint(followStats.isFollowing ? .white : Theme.primaryColor)
-                        }
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
-                }
-                .buttonStyle(.plain)
-                .background(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(followStats.isFollowing ? Color.white.opacity(0.2) : Color.white)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(Color.white.opacity(followStats.isFollowing ? 0.4 : 0), lineWidth: 1)
-                )
-                .foregroundStyle(followStats.isFollowing ? Color.white : Theme.primaryColor)
-                .disabled(isUpdatingFollow || isLoadingFollowStats)
-                .padding(.top, Theme.spacingSmall)
+                .frame(maxWidth: .infinity)
             }
 
             if let message = followErrorMessage, message.isEmpty == false {
                 Text(message)
-                    .font(.footnote)
+                    .font(.caption)
                     .foregroundStyle(Color.red.opacity(0.85))
-                    .multilineTextAlignment(.center)
+                    .multilineTextAlignment(.leading)
             }
         }
+    }
+
+    private func followActionButton(for profile: UserProfile) -> some View {
+        Button {
+            Task { await handleFollowTap(for: profile) }
+        } label: {
+            ZStack {
+                HStack(spacing: 8) {
+                    Image(systemName: followStats.isFollowing ? "checkmark" : "person.badge.plus")
+                        .font(.subheadline.weight(.semibold))
+                    Text(followStats.isFollowing ? "Following" : "Follow")
+                        .font(.subheadline.weight(.semibold))
+                }
+                .opacity(isUpdatingFollow ? 0 : 1)
+
+                if isUpdatingFollow {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .tint(followStats.isFollowing ? Theme.primaryColor : Color.white)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+        }
+        .buttonStyle(.plain)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(followStats.isFollowing ? Theme.primaryColor.opacity(0.15) : Theme.primaryColor)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Theme.primaryColor.opacity(followStats.isFollowing ? 0.35 : 0), lineWidth: 1)
+        )
+        .foregroundStyle(followStats.isFollowing ? Theme.primaryColor : Color.white)
+        .disabled(isUpdatingFollow || isLoadingFollowStats)
+        .frame(minWidth: 110)
     }
 
     private func followMetricView(count: Int, label: String) -> some View {
         VStack(spacing: 4) {
             Text("\(count)")
-                .font(.subheadline.weight(.bold))
-                .foregroundStyle(.white)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Color.primary)
             Text(label.uppercased())
                 .font(.caption2.weight(.semibold))
-                .foregroundStyle(.white.opacity(0.75))
+                .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
     }
