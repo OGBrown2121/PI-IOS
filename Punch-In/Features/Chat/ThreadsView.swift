@@ -11,6 +11,7 @@ struct ThreadsView: View {
     @State private var presentedError: String?
     @State private var isShowingAlerts = false
     @State private var deepLinkedThread: ChatThread?
+    @State private var threadPendingDeletion: ChatThread?
 
     init(viewModel: ChatViewModel) {
         _viewModel = StateObject(wrappedValue: viewModel)
@@ -25,25 +26,7 @@ struct ThreadsView: View {
             } else {
                 Section(header: Text("Conversations")) {
                     ForEach(viewModel.filteredThreads) { thread in
-                        NavigationLink {
-                            ChatDetailView(
-                                viewModel: ChatDetailViewModel(
-                                    thread: thread,
-                                    chatService: di.chatService,
-                                    storageService: di.storageService,
-                                    appState: appState
-                                ) { updatedThread in
-                                    viewModel.handleThreadUpdate(updatedThread)
-                                }
-                            )
-                        } label: {
-                            ChatThreadRow(
-                                thread: thread,
-                                currentUserId: viewModel.currentUserId
-                            )
-                        }
-                        .listRowSeparator(.hidden)
-                        .listRowBackground(Color.clear)
+                        threadNavigationRow(for: thread)
                     }
                 }
             }
@@ -80,6 +63,26 @@ struct ThreadsView: View {
         ), actions: {
             Button("OK", role: .cancel) { presentedError = nil }
         })
+        .confirmationDialog(
+            "Delete this chat?",
+            item: $threadPendingDeletion,
+            titleVisibility: .visible
+        ) { thread in
+            Button("Delete Chat", role: .destructive) {
+                threadPendingDeletion = nil
+                Task { @MainActor in
+                    if await viewModel.deleteThread(thread) {
+                        showToast("Chat deleted")
+                    }
+                }
+            }
+
+            Button("Cancel", role: .cancel) {
+                threadPendingDeletion = nil
+            }
+        } message: { _ in
+            Text("This removes the chat from your inbox.")
+        }
         .sheet(isPresented: $isShowingAlerts) {
             NavigationStack {
                 AlertsView()
@@ -95,16 +98,7 @@ struct ThreadsView: View {
         }
         .sheet(item: $deepLinkedThread) { thread in
             NavigationStack {
-                ChatDetailView(
-                    viewModel: ChatDetailViewModel(
-                        thread: thread,
-                        chatService: di.chatService,
-                        storageService: di.storageService,
-                        appState: appState
-                    ) { updatedThread in
-                        viewModel.handleThreadUpdate(updatedThread)
-                    }
-                )
+                chatDetailDestination(for: thread)
             }
         }
         .onChange(of: viewModel.errorMessage) { _, newValue in
@@ -151,6 +145,73 @@ struct ThreadsView: View {
         .listRowBackground(Color.clear)
     }
 
+    @ViewBuilder
+    private func chatDetailDestination(for thread: ChatThread) -> some View {
+        ChatDetailView(viewModel: makeChatDetailViewModel(for: thread))
+    }
+
+    @ViewBuilder
+    private func threadNavigationRow(for thread: ChatThread) -> some View {
+        NavigationLink {
+            chatDetailDestination(for: thread)
+        } label: {
+            ChatThreadRow(
+                thread: thread,
+                currentUserId: viewModel.currentUserId
+            )
+        }
+        .listRowSeparator(.hidden)
+        .listRowBackground(Color.clear)
+        .swipeActions(allowsFullSwipe: false) {
+            muteActionButton(for: thread)
+            deleteActionButton(for: thread)
+        }
+    }
+
+    @ViewBuilder
+    private func muteActionButton(for thread: ChatThread) -> some View {
+        let isMuted = thread.isMuted(by: viewModel.currentUserId)
+        Button {
+            Task { @MainActor in
+                if let result = await viewModel.toggleMute(for: thread) {
+                    showToast(result ? "Chat muted" : "Chat unmuted")
+                }
+            }
+        } label: {
+            Label(
+                isMuted ? "Unmute" : "Mute",
+                systemImage: isMuted ? "bell.fill" : "bell.slash"
+            )
+        }
+        .tint(Theme.primaryColor)
+    }
+
+    @ViewBuilder
+    private func deleteActionButton(for thread: ChatThread) -> some View {
+        Button(role: .destructive) {
+            threadPendingDeletion = thread
+        } label: {
+            Label("Delete", systemImage: "trash")
+        }
+    }
+
+    @MainActor
+    private func makeChatDetailViewModel(for thread: ChatThread) -> ChatDetailViewModel {
+        ChatDetailViewModel(
+            thread: thread,
+            chatService: di.chatService,
+            storageService: di.storageService,
+            appState: appState,
+            onThreadUpdated: { updatedThread in
+                viewModel.handleThreadUpdate(updatedThread)
+            },
+            onThreadDeleted: { deletedId in
+                viewModel.removeThread(withId: deletedId)
+                showToast("Chat deleted")
+            }
+        )
+    }
+
     @MainActor
     private func showToast(_ message: String) {
         toastDismissTask?.cancel()
@@ -195,6 +256,17 @@ private struct ChatThreadRow: View {
                     Text("No messages yet")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
+                }
+
+                if thread.isMuted(by: currentUserId) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "bell.slash.fill")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text("Muted")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 if thread.isGroup {

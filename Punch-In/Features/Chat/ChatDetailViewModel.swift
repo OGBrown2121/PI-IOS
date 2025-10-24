@@ -7,27 +7,33 @@ final class ChatDetailViewModel: ObservableObject {
     @Published var isSendingMessage = false
     @Published var isUpdatingSettings = false
     @Published var isUpdatingProject = false
+    @Published var isUpdatingMute = false
+    @Published var isDeletingThread = false
     @Published var errorMessage: String?
     @Published var downloadInProgressFileId: String?
     @Published var uploadProgress: Double?
+    @Published private(set) var didDeleteThread = false
 
     private let chatService: any ChatService
     private let storageService: any StorageService
     private let appState: AppState
     private let onThreadUpdated: ((ChatThread) -> Void)?
+    private let onThreadDeleted: ((String) -> Void)?
 
     init(
         thread: ChatThread,
         chatService: any ChatService,
         storageService: any StorageService,
         appState: AppState,
-        onThreadUpdated: ((ChatThread) -> Void)? = nil
+        onThreadUpdated: ((ChatThread) -> Void)? = nil,
+        onThreadDeleted: ((String) -> Void)? = nil
     ) {
         self.thread = thread
         self.chatService = chatService
         self.storageService = storageService
         self.appState = appState
         self.onThreadUpdated = onThreadUpdated
+        self.onThreadDeleted = onThreadDeleted
     }
 
     var sortedMessages: [ChatMessage] {
@@ -51,6 +57,10 @@ final class ChatDetailViewModel: ObservableObject {
             return currentPlan
         }
         return .free
+    }
+
+    var isMutedByCurrentUser: Bool {
+        thread.isMuted(by: currentUserParticipant?.id)
     }
 
     var storagePlanDescription: String {
@@ -159,6 +169,45 @@ final class ChatDetailViewModel: ObservableObject {
             errorMessage = error.localizedDescription
         }
         isUpdatingSettings = false
+    }
+
+    func setThreadMuted(_ isMuted: Bool) async {
+        guard currentUserParticipant != nil else {
+            errorMessage = "You need an active profile to manage notifications."
+            return
+        }
+        errorMessage = nil
+        isUpdatingMute = true
+        do {
+            let updated = try await chatService.setThreadMuted(threadId: thread.id, isMuted: isMuted)
+            thread = updated
+            onThreadUpdated?(updated)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        isUpdatingMute = false
+    }
+
+    @discardableResult
+    func deleteThread() async -> Bool {
+        guard currentUserParticipant != nil else {
+            errorMessage = "You need an active profile to manage chats."
+            return false
+        }
+
+        errorMessage = nil
+        isDeletingThread = true
+        defer { isDeletingThread = false }
+
+        do {
+            try await chatService.deleteThread(threadId: thread.id)
+            didDeleteThread = true
+            onThreadDeleted?(thread.id)
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
     }
 
     func addTask(title: String) async {

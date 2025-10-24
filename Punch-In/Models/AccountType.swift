@@ -229,11 +229,57 @@ enum AccountType: String, CaseIterable, Identifiable, Codable, Equatable {
     var isPrivateProfile: Bool { self == .anr }
 
     struct ContactAction {
+        struct BookingFlowConfiguration {
+            let requestTitle: String
+            let requestDescription: String
+            let includesSchedule: Bool
+            let durationLabel: String
+            let durationOptions: [Int]
+            let defaultDurationMinutes: Int
+            let includesLocation: Bool
+            let locationLabel: String
+            let includesBudget: Bool
+            let budgetLabel: String
+            let notesPlaceholder: String
+            let submitButtonTitle: String
+            let emailSubject: String
+
+            init(
+                requestTitle: String,
+                requestDescription: String,
+                includesSchedule: Bool = true,
+                durationLabel: String,
+                durationOptions: [Int],
+                defaultDurationMinutes: Int,
+                includesLocation: Bool,
+                locationLabel: String,
+                includesBudget: Bool,
+                budgetLabel: String,
+                notesPlaceholder: String,
+                submitButtonTitle: String,
+                emailSubject: String
+            ) {
+                self.requestTitle = requestTitle
+                self.requestDescription = requestDescription
+                self.includesSchedule = includesSchedule
+                self.durationLabel = durationLabel
+                self.durationOptions = durationOptions
+                self.defaultDurationMinutes = defaultDurationMinutes
+                self.includesLocation = includesLocation
+                self.locationLabel = locationLabel
+                self.includesBudget = includesBudget
+                self.budgetLabel = budgetLabel
+                self.notesPlaceholder = notesPlaceholder
+                self.submitButtonTitle = submitButtonTitle
+                self.emailSubject = emailSubject
+            }
+        }
         let cardTitle: String
         let cardIcon: String
         let buttonTitle: String
         let sheetTitle: String
         let sheetMessage: String
+        let bookingFlow: BookingFlowConfiguration
     }
 
     var contactAction: ContactAction? {
@@ -243,64 +289,177 @@ enum AccountType: String, CaseIterable, Identifiable, Codable, Equatable {
                 cardTitle: "Book this DJ",
                 cardIcon: "music.note",
                 buttonTitle: "Book This DJ",
-                sheetTitle: "Connect with this DJ",
-                sheetMessage: "Share your event date, location, and vibe so they can confirm availability."
+                sheetTitle: "DJ Booking",
+                sheetMessage: "Share your event date, location, and vibe so they can confirm availability.",
+                bookingFlow: .init(
+                    requestTitle: "DJ Booking",
+                    requestDescription: "Lock in your DJ by outlining the event details, length of the set, and the vibe you're aiming for.",
+                    durationLabel: "Set length",
+                    durationOptions: [60, 90, 120, 180],
+                    defaultDurationMinutes: 120,
+                    includesLocation: true,
+                    locationLabel: "Event location",
+                    includesBudget: true,
+                    budgetLabel: "Budget (optional)",
+                    notesPlaceholder: "Share the crowd size, preferred genres, equipment on site, and any must-play moments.",
+                    submitButtonTitle: "Send DJ Request",
+                    emailSubject: "DJ Booking Request"
+                )
             )
         case .photographer:
             return ContactAction(
                 cardTitle: "Book this Photographer",
                 cardIcon: "camera.fill",
                 buttonTitle: "Book This Photographer",
-                sheetTitle: "Request a shoot",
-                sheetMessage: "Provide shoot details like location, time, and creative direction."
+                sheetTitle: "Photo Shoot",
+                sheetMessage: "Provide shoot details like location, time, and creative direction.",
+                bookingFlow: .init(
+                    requestTitle: "Photo Shoot Request",
+                    requestDescription: "Outline the shoot concept, timing, and deliverables so they can prep the right gear.",
+                    durationLabel: "Shoot length",
+                    durationOptions: [60, 90, 120, 180],
+                    defaultDurationMinutes: 120,
+                    includesLocation: true,
+                    locationLabel: "Shoot location",
+                    includesBudget: true,
+                    budgetLabel: "Budget (optional)",
+                    notesPlaceholder: "Share inspiration, shot list ideas, wardrobe plans, and delivery expectations.",
+                    submitButtonTitle: "Send Shoot Request",
+                    emailSubject: "Photography Booking Request"
+                )
             )
         case .videographer:
             return ContactAction(
                 cardTitle: "Book this Videographer",
                 cardIcon: "video.fill",
                 buttonTitle: "Book This Videographer",
-                sheetTitle: "Start a video project",
-                sheetMessage: "Let them know the concept, timeline, and deliverables you're expecting."
+                sheetTitle: "Video Project",
+                sheetMessage: "Let them know the concept, timeline, and deliverables you're expecting.",
+                bookingFlow: .init(
+                    requestTitle: "Video Project Request",
+                    requestDescription: "Share the concept, production timing, and final deliverables to kick off the project.",
+                    durationLabel: "Production length",
+                    durationOptions: [120, 180, 240, 360],
+                    defaultDurationMinutes: 240,
+                    includesLocation: true,
+                    locationLabel: "Shoot location",
+                    includesBudget: true,
+                    budgetLabel: "Budget (optional)",
+                    notesPlaceholder: "Describe the storyline, references, crew needs, and post-production expectations.",
+                    submitButtonTitle: "Send Video Request",
+                    emailSubject: "Videography Booking Request"
+                )
             )
         case .eventCenter:
             return ContactAction(
                 cardTitle: "Request this Venue",
                 cardIcon: "building.2.fill",
                 buttonTitle: "Request This Venue",
-                sheetTitle: "Request a venue booking",
-                sheetMessage: "Include your event size, preferred dates, and production needs."
+                sheetTitle: "Venue Request",
+                sheetMessage: "Include your event size, preferred dates, and production needs.",
+                bookingFlow: .init(
+                    requestTitle: "Venue Booking Request",
+                    requestDescription: "Map out the event timing, production needs, and audience size so the venue can confirm availability.",
+                    durationLabel: "Event duration",
+                    durationOptions: [180, 240, 360, 480],
+                    defaultDurationMinutes: 240,
+                    includesLocation: false,
+                    locationLabel: "",
+                    includesBudget: true,
+                    budgetLabel: "Budget (optional)",
+                    notesPlaceholder: "Share load-in requirements, production needs, and any special requests.",
+                    submitButtonTitle: "Send Venue Request",
+                    emailSubject: "Venue Booking Request"
+                )
             )
         case .podcast:
             return ContactAction(
                 cardTitle: "Request this Content Studio",
                 cardIcon: "mic.fill",
                 buttonTitle: "Request This Content Studio",
-                sheetTitle: "Request studio time",
-                sheetMessage: "Share the type of content you're producing and when you'd like to record."
+                sheetTitle: "Studio Request",
+                sheetMessage: "Share the type of content you're producing and when you'd like to record.",
+                bookingFlow: .init(
+                    requestTitle: "Studio Session Request",
+                    requestDescription: "Let them know the format, session timing, and equipment needs for your content.",
+                    durationLabel: "Session length",
+                    durationOptions: [60, 90, 120, 180],
+                    defaultDurationMinutes: 120,
+                    includesLocation: false,
+                    locationLabel: "",
+                    includesBudget: true,
+                    budgetLabel: "Budget (optional)",
+                    notesPlaceholder: "List your show format, crew size, and any gear or set needs.",
+                    submitButtonTitle: "Send Studio Request",
+                    emailSubject: "Content Studio Booking Request"
+                )
             )
         case .designer:
             return ContactAction(
                 cardTitle: "Place a Bid",
                 cardIcon: "tag.fill",
                 buttonTitle: "Place a Bid",
-                sheetTitle: "Bid on this collection",
-                sheetMessage: "Send your offer, sizing, and any customization requests."
+                sheetTitle: "Collection Request",
+                sheetMessage: "Send your offer, sizing, and any customization requests.",
+                bookingFlow: .init(
+                    requestTitle: "Design Bid",
+                    requestDescription: "Outline your desired pieces, sizing, and turnaround to receive an accurate quote.",
+                    includesSchedule: false,
+                    durationLabel: "Consultation length",
+                    durationOptions: [30, 45, 60],
+                    defaultDurationMinutes: 45,
+                    includesLocation: false,
+                    locationLabel: "",
+                    includesBudget: true,
+                    budgetLabel: "Offer amount",
+                    notesPlaceholder: "Share measurements, fabric preferences, customization ideas, and delivery expectations.",
+                    submitButtonTitle: "Send Bid",
+                    emailSubject: "Design Bid Request"
+                )
             )
         case .videoVixen:
             return ContactAction(
                 cardTitle: "Request this Model",
                 cardIcon: "sparkles",
                 buttonTitle: "Request This Model",
-                sheetTitle: "Request a booking",
-                sheetMessage: "Share project details, shoot timing, and compensation to start the conversation."
+                sheetTitle: "Model Booking",
+                sheetMessage: "Share project details, shoot timing, and compensation to start the conversation.",
+                bookingFlow: .init(
+                    requestTitle: "Model Booking Request",
+                    requestDescription: "Provide shoot dates, project concept, and usage details so they can confirm.",
+                    durationLabel: "Booking length",
+                    durationOptions: [60, 90, 120, 180],
+                    defaultDurationMinutes: 120,
+                    includesLocation: true,
+                    locationLabel: "Shoot location",
+                    includesBudget: true,
+                    budgetLabel: "Compensation offer",
+                    notesPlaceholder: "Include wardrobe expectations, concept references, and release details.",
+                    submitButtonTitle: "Send Booking Request",
+                    emailSubject: "Model Booking Request"
+                )
             )
         case .journalist:
             return ContactAction(
                 cardTitle: "Request coverage",
                 cardIcon: "newspaper.fill",
                 buttonTitle: "Request an Interview",
-                sheetTitle: "Pitch your story",
-                sheetMessage: "Provide your angle, timing, and any materials to help them prep."
+                sheetTitle: "Interview Request",
+                sheetMessage: "Provide your angle, timing, and any materials to help them prep.",
+                bookingFlow: .init(
+                    requestTitle: "Interview Request",
+                    requestDescription: "Share your story angle, preferred timing, and supporting materials.",
+                    durationLabel: "Interview length",
+                    durationOptions: [30, 45, 60, 90],
+                    defaultDurationMinutes: 45,
+                    includesLocation: true,
+                    locationLabel: "Interview location or link",
+                    includesBudget: false,
+                    budgetLabel: "",
+                    notesPlaceholder: "Outline the interview format, outlet, publication date, and any talking points.",
+                    submitButtonTitle: "Send Interview Request",
+                    emailSubject: "Interview Request"
+                )
             )
         default:
             return nil

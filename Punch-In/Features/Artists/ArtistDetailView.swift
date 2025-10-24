@@ -39,7 +39,7 @@ struct ArtistDetailView: View {
     @State private var beatDownloadManagementMessageTask: Task<Void, Never>?
     @State private var presentedFollowList: FollowConnectionsKind?
     @State private var isShowingReportSheet = false
-    @State private var contactContext: ContactActionContext?
+    @State private var bookingContext: BookingActionContext?
     @State private var toastMessage: String?
     @State private var toastTask: Task<Void, Never>?
 
@@ -168,12 +168,12 @@ struct ArtistDetailView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .sheet(item: $contactContext) { context in
-            ProfileContactSheet(
+        .sheet(item: $bookingContext) { context in
+            ProfileBookingFlowView(
                 context: context,
                 openURLAction: openURL,
                 onCopy: { copiedValue in
-                    showToast("\(copiedValue) copied to clipboard")
+                    showToast(copiedValue)
                 },
                 onUnavailable: {
                     showToast("No direct contact info has been shared yet.")
@@ -335,7 +335,7 @@ struct ArtistDetailView: View {
                     .foregroundStyle(.secondary)
 
                 PrimaryButton(title: action.buttonTitle) {
-                    contactContext = ContactActionContext(action: action, profile: profile)
+                    bookingContext = BookingActionContext(action: action, profile: profile)
                 }
             }
         }
@@ -1026,26 +1026,93 @@ struct ArtistDetailView: View {
         .shadow(color: Color.black.opacity(0.12), radius: 18, x: 0, y: 10)
     }
 
-    private struct ContactActionContext: Identifiable {
+    private struct BookingActionContext: Identifiable {
         let id = UUID()
         let action: AccountType.ContactAction
         let profile: UserProfile
     }
 
-    private struct ProfileContactSheet: View {
+    private struct ProfileBookingFlowView: View {
         @Environment(\.dismiss) private var dismiss
-        let context: ContactActionContext
+        let context: BookingActionContext
         let openURLAction: OpenURLAction
         let onCopy: (String) -> Void
         let onUnavailable: () -> Void
 
+        @State private var startDate = ProfileBookingFlowView.defaultStartDate()
+        @State private var durationMinutes: Int
+        @State private var location: String = ""
+        @State private var budget: String = ""
+        @State private var notes: String = ""
+        @State private var showMissingContactAlert = false
+
+        init(
+            context: BookingActionContext,
+            openURLAction: OpenURLAction,
+            onCopy: @escaping (String) -> Void,
+            onUnavailable: @escaping () -> Void
+        ) {
+            self.context = context
+            self.openURLAction = openURLAction
+            self.onCopy = onCopy
+            self.onUnavailable = onUnavailable
+            _durationMinutes = State(initialValue: context.action.bookingFlow.defaultDurationMinutes)
+        }
+
         var body: some View {
             NavigationStack {
-                List {
-                    Section("Details") {
-                        Text(context.action.sheetMessage)
-                            .font(.subheadline)
+                Form {
+                    Section {
+                        Text(context.action.bookingFlow.requestDescription)
+                            .font(.footnote)
                             .foregroundStyle(.secondary)
+                            .padding(.vertical, 2)
+                    }
+
+                    if context.action.bookingFlow.includesSchedule {
+                        Section("Schedule") {
+                            DatePicker(
+                                "Start",
+                                selection: $startDate,
+                                in: Date()...,
+                                displayedComponents: [.date, .hourAndMinute]
+                            )
+                            Picker(context.action.bookingFlow.durationLabel, selection: $durationMinutes) {
+                                ForEach(context.action.bookingFlow.durationOptions, id: \.self) { value in
+                                    Text(Self.durationLabel(for: value)).tag(value)
+                                }
+                            }
+                        }
+                    }
+
+                    if context.action.bookingFlow.includesLocation {
+                        Section(context.action.bookingFlow.locationLabel) {
+                            TextField("Add location details", text: $location)
+                                .textInputAutocapitalization(.words)
+                                .disableAutocorrection(true)
+                        }
+                    }
+
+                    if context.action.bookingFlow.includesBudget {
+                        Section(context.action.bookingFlow.budgetLabel) {
+                            TextField("Optional", text: $budget)
+                                .keyboardType(.numbersAndPunctuation)
+                        }
+                    }
+
+                    Section("Project details") {
+                        ZStack(alignment: .topLeading) {
+                            TextEditor(text: $notes)
+                                .frame(minHeight: 140)
+                                .padding(.top, 4)
+                            if notes.isEmpty {
+                                Text(context.action.bookingFlow.notesPlaceholder)
+                                    .foregroundStyle(.secondary)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 12)
+                                    .allowsHitTesting(false)
+                            }
+                        }
                     }
 
                     Section("Contact") {
@@ -1058,7 +1125,7 @@ struct ArtistDetailView: View {
                                 switch method {
                                 case .email(let value):
                                     Button {
-                                        openEmail(value)
+                                        openEmail(value, summary: requestSummary())
                                     } label: {
                                         Label("Email", systemImage: "envelope.fill")
                                     }
@@ -1069,9 +1136,9 @@ struct ArtistDetailView: View {
                                     }
                                 case .phone(let value):
                                     Button {
-                                        callNumber(value)
+                                        messageNumber(value)
                                     } label: {
-                                        Label("Call", systemImage: "phone.fill")
+                                        Label("Message", systemImage: "bubble.left.and.bubble.right.fill")
                                     }
                                     Button {
                                         copyToClipboard(value, description: "Phone number")
@@ -1082,25 +1149,57 @@ struct ArtistDetailView: View {
                             }
                         }
                     }
+
+                    Section {
+                        PrimaryButton(title: context.action.bookingFlow.submitButtonTitle) {
+                            prepareRequest()
+                        }
+                        .disabled(contactMethods.isEmpty)
+                    }
+                    .listRowBackground(Color.clear)
                 }
-                .navigationTitle(context.action.sheetTitle)
+                .navigationTitle(context.action.bookingFlow.requestTitle)
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
-                        Button("Done") { dismiss() }
+                        Button("Close") { dismiss() }
                     }
                 }
-                .onAppear {
-                    if contactMethods.isEmpty {
-                        onUnavailable()
-                    }
+                .alert("No contact info shared", isPresented: $showMissingContactAlert) {
+                    Button("OK", role: .cancel) {}
+                } message: {
+                    Text("This profile hasn’t listed a way to get in touch yet.")
                 }
+                .onAppear { handleOnAppear() }
             }
         }
 
         private enum ContactMethod: Hashable {
             case email(String)
             case phone(String)
+        }
+
+        private static func defaultStartDate() -> Date {
+            let calendar = Calendar.current
+            let now = Date()
+            let minute = calendar.component(.minute, from: now)
+            let remainder = minute % 30
+            let adjustment = remainder == 0 ? 0 : (30 - remainder)
+            let rounded = calendar.date(byAdding: .minute, value: adjustment, to: now) ?? now
+            return calendar.date(byAdding: .hour, value: 1, to: rounded) ?? now.addingTimeInterval(3600)
+        }
+
+        private static func durationLabel(for minutes: Int) -> String {
+            let hours = minutes / 60
+            let remainingMinutes = minutes % 60
+            switch (hours, remainingMinutes) {
+            case (0, let mins):
+                return "\(mins)m"
+            case (let hrs, 0):
+                return "\(hrs)h"
+            default:
+                return "\(hours)h \(remainingMinutes)m"
+            }
         }
 
         private var contactMethods: [ContactMethod] {
@@ -1117,24 +1216,114 @@ struct ArtistDetailView: View {
             return methods
         }
 
-        private func openEmail(_ address: String) {
-            guard let url = URL(string: "mailto:\(address)") else { return }
-            openURLAction(url)
+        private var primaryEmail: String? {
+            for method in contactMethods {
+                if case let .email(value) = method {
+                    return value
+                }
+            }
+            return nil
+        }
+
+        private var primaryPhone: String? {
+            for method in contactMethods {
+                if case let .phone(value) = method {
+                    return value
+                }
+            }
+            return nil
+        }
+
+        private func handleOnAppear() {
+            if contactMethods.isEmpty {
+                onUnavailable()
+                showMissingContactAlert = true
+            }
+        }
+
+        private func prepareRequest() {
+            guard contactMethods.isEmpty == false else {
+                onUnavailable()
+                showMissingContactAlert = true
+                return
+            }
+
+            let summary = requestSummary()
+            copyToClipboard(summary, description: "Request details")
+
+            if let email = primaryEmail {
+                openEmail(email, summary: summary)
+            } else if let phone = primaryPhone {
+                messageNumber(phone)
+            }
+
             dismiss()
         }
 
-        private func callNumber(_ number: String) {
-            let digits = number.trimmingCharacters(in: .whitespaces)
-            guard let url = URL(string: "tel:\(digits)") else { return }
+        private func requestSummary() -> String {
+            var lines: [String] = []
+            let displayName = context.profile.displayName.isEmpty ? "@\(context.profile.username)" : context.profile.displayName
+            lines.append("Request for \(displayName) (\(context.profile.accountType.title))")
+
+            if context.action.bookingFlow.includesSchedule {
+                let formatter = DateFormatter()
+                formatter.dateStyle = .medium
+                formatter.timeStyle = .short
+                lines.append("When: \(formatter.string(from: startDate))")
+                lines.append("\(context.action.bookingFlow.durationLabel): \(Self.durationLabel(for: durationMinutes))")
+            }
+
+            if context.action.bookingFlow.includesLocation {
+                let trimmed = location.trimmed
+                if trimmed.isEmpty == false {
+                    lines.append("Location: \(trimmed)")
+                }
+            }
+
+            if context.action.bookingFlow.includesBudget {
+                let trimmed = budget.trimmed
+                if trimmed.isEmpty == false {
+                    lines.append("Budget: \(trimmed)")
+                }
+            }
+
+            let trimmedNotes = notes.trimmed
+            if trimmedNotes.isEmpty == false {
+                lines.append("")
+                lines.append("Details:")
+                lines.append(trimmedNotes)
+            }
+
+            return lines.joined(separator: "\n")
+        }
+
+        private func openEmail(_ address: String, summary: String) {
+            guard let url = emailURL(for: address, summary: summary) else { return }
             openURLAction(url)
-            dismiss()
+        }
+
+        private func messageNumber(_ number: String) {
+            let digits = number.filter { "0123456789+".contains($0) }
+            guard let url = URL(string: "sms:\(digits)") else { return }
+            openURLAction(url)
+        }
+
+        private func emailURL(for address: String, summary: String) -> URL? {
+            var components = URLComponents()
+            components.scheme = "mailto"
+            components.path = address
+            components.queryItems = [
+                URLQueryItem(name: "subject", value: context.action.bookingFlow.emailSubject),
+                URLQueryItem(name: "body", value: summary)
+            ]
+            return components.url
         }
 
         private func copyToClipboard(_ value: String, description: String) {
             #if canImport(UIKit)
             UIPasteboard.general.string = value
             #endif
-            onCopy(description)
+            onCopy("\(description) copied to clipboard")
         }
     }
 

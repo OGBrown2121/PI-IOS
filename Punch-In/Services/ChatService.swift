@@ -26,6 +26,8 @@ protocol ChatService {
         threadId: String,
         project: ChatThread.Project
     ) async throws -> ChatThread
+    func setThreadMuted(threadId: String, isMuted: Bool) async throws -> ChatThread
+    func deleteThread(threadId: String) async throws
     func searchParticipants(query: String, excludingIds: Set<String>) async throws -> [ChatParticipant]
 }
 
@@ -33,17 +35,30 @@ protocol ChatService {
 final class MockChatService: ChatService {
     private var threads: [ChatThread]
     private var participants: [ChatParticipant]
+    private let currentUserId: String
 
     init(
         participants: [ChatParticipant] = ChatParticipant.sampleAll,
-        threads: [ChatThread] = ChatThread.mockList
+        threads: [ChatThread] = ChatThread.mockList,
+        currentUserId: String? = nil
     ) {
         self.participants = participants
         self.threads = threads
+        if let currentUserId {
+            self.currentUserId = currentUserId
+        } else if let userId = participants.first?.id {
+            self.currentUserId = userId
+        } else if let threadOwner = threads.first?.creatorId {
+            self.currentUserId = threadOwner
+        } else {
+            self.currentUserId = UUID().uuidString
+        }
     }
 
     func fetchThreads() async throws -> [ChatThread] {
-        threads.sorted { lhs, rhs in
+        threads
+            .filter { !$0.deletedParticipantIds.contains(currentUserId) }
+            .sorted { lhs, rhs in
             (lhs.lastMessageAt ?? .distantPast) > (rhs.lastMessageAt ?? .distantPast)
         }
     }
@@ -124,6 +139,26 @@ final class MockChatService: ChatService {
         return threads[index]
     }
 
+    func setThreadMuted(threadId: String, isMuted: Bool) async throws -> ChatThread {
+        guard let index = threads.firstIndex(where: { $0.id == threadId }) else {
+            throw ChatServiceError.threadNotFound
+        }
+
+        if isMuted {
+            threads[index].mutedParticipantIds.insert(currentUserId)
+        } else {
+            threads[index].mutedParticipantIds.remove(currentUserId)
+        }
+        return threads[index]
+    }
+
+    func deleteThread(threadId: String) async throws {
+        guard let index = threads.firstIndex(where: { $0.id == threadId }) else {
+            throw ChatServiceError.threadNotFound
+        }
+        threads[index].deletedParticipantIds.insert(currentUserId)
+    }
+
     func searchParticipants(query: String, excludingIds: Set<String>) async throws -> [ChatParticipant] {
         guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return participants.filter { !excludingIds.contains($0.id) }
@@ -152,6 +187,8 @@ final class FirestoreChatService: ChatService {
         static let creatorId = "creatorId"
         static let kind = "kind"
         static let groupSettings = "groupSettings"
+        static let mutedParticipantIds = "mutedParticipantIds"
+        static let deletedParticipantIds = "deletedParticipantIds"
         static let lastMessageAt = "lastMessageAt"
         static let lastMessage = "lastMessage"
         static let allowsParticipantEditing = "allowsParticipantEditing"
@@ -253,6 +290,9 @@ final class FirestoreChatService: ChatService {
         var threads: [ChatThread] = []
         for document in snapshot.documents {
             if let thread = try decodeThread(from: document) {
+                if let userId = currentUserId(), thread.deletedParticipantIds.contains(userId) {
+                    continue
+                }
                 threads.append(thread)
             }
         }
@@ -339,7 +379,9 @@ final class FirestoreChatService: ChatService {
             Field.participantIds: participantIds,
             Field.participants: normalizedParticipants.map(encodeParticipant(_:)),
             Field.createdAt: Timestamp(date: dateProvider()),
-            Field.dataVersion: 1
+            Field.dataVersion: 1,
+            Field.mutedParticipantIds: [],
+            Field.deletedParticipantIds: []
         ]
 
         if let participantIdsValue = data[Field.participantIds] {
@@ -494,6 +536,36 @@ final class FirestoreChatService: ChatService {
         }
         thread = thread.updating(project: project)
         return thread
+    }
+
+    func setThreadMuted(threadId: String, isMuted: Bool) async throws -> ChatThread {
+        guard let userId = currentUserId() else {
+            throw ChatServiceError.unauthorized
+        }
+        let conversationRef = firestore.collection(Field.conversations).document(threadId)
+        let mutation: [String: Any]
+        if isMuted {
+            mutation = [Field.mutedParticipantIds: FieldValue.arrayUnion([userId])]
+        } else {
+            mutation = [Field.mutedParticipantIds: FieldValue.arrayRemove([userId])]
+        }
+        try await conversationRef.updateData(mutation)
+
+        let document = try await conversationRef.getDocument()
+        guard let thread = try decodeThread(from: document) else {
+            throw ChatServiceError.threadNotFound
+        }
+        return thread
+    }
+
+    func deleteThread(threadId: String) async throws {
+        guard let userId = currentUserId() else {
+            throw ChatServiceError.unauthorized
+        }
+        let conversationRef = firestore.collection(Field.conversations).document(threadId)
+        try await conversationRef.updateData([
+            Field.deletedParticipantIds: FieldValue.arrayUnion([userId])
+        ])
     }
 
     func searchParticipants(query: String, excludingIds: Set<String>) async throws -> [ChatParticipant] {
@@ -713,6 +785,9 @@ final class FirestoreChatService: ChatService {
             messages = [message]
         }
 
+        let mutedIds = Set(data[Field.mutedParticipantIds] as? [String] ?? [])
+        let deletedIds = Set(data[Field.deletedParticipantIds] as? [String] ?? [])
+
         return ChatThread(
             id: document.documentID,
             creatorId: creatorId,
@@ -721,7 +796,9 @@ final class FirestoreChatService: ChatService {
             groupSettings: settings,
             lastMessageAt: lastMessageAt,
             messages: messages,
-            project: project
+            project: project,
+            mutedParticipantIds: mutedIds,
+            deletedParticipantIds: deletedIds
         )
     }
 
@@ -1077,6 +1154,7 @@ final class FirestoreChatService: ChatService {
 enum ChatServiceError: LocalizedError {
     case threadNotFound
     case uploadFailed
+    case unauthorized
 
     var errorDescription: String? {
         switch self {
@@ -1084,6 +1162,8 @@ enum ChatServiceError: LocalizedError {
             return "Unable to locate this conversation."
         case .uploadFailed:
             return "We couldn't upload this file."
+        case .unauthorized:
+            return "You need to be signed in to manage this chat."
         }
     }
 }

@@ -36,6 +36,8 @@ struct ChatDetailView: View {
     @State private var presentedMedia: ProjectMediaPresentation?
     @FocusState private var isTaskFieldFocused: Bool
     @Environment(\.openURL) private var openURL
+    @Environment(\.dismiss) private var dismiss
+    @State private var isShowingDeleteConfirmation = false
 
     init(viewModel: ChatDetailViewModel) {
         _viewModel = StateObject(wrappedValue: viewModel)
@@ -73,16 +75,14 @@ struct ChatDetailView: View {
         .navigationTitle(viewModel.thread.displayName(currentUserId: viewModel.currentUserParticipant?.id))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if viewModel.thread.isGroup {
-                ToolbarItem(placement: .primaryAction) {
+            ToolbarItemGroup(placement: .primaryAction) {
+                if viewModel.thread.isGroup {
                     Button {
                         isShowingGroupSettings = true
                     } label: {
                         Image(systemName: "person.3")
                     }
-                }
-            } else if let participant = otherParticipants.first {
-                ToolbarItem(placement: .primaryAction) {
+                } else if let participant = otherParticipants.first {
                     Button {
                         selectedParticipant = participant
                     } label: {
@@ -90,6 +90,30 @@ struct ChatDetailView: View {
                     }
                     .accessibilityLabel("View participant profile")
                 }
+
+                Menu {
+                    Button {
+                        let shouldMute = !viewModel.isMutedByCurrentUser
+                        Task { await viewModel.setThreadMuted(shouldMute) }
+                    } label: {
+                        Label(
+                            viewModel.isMutedByCurrentUser ? "Unmute Chat" : "Mute Chat",
+                            systemImage: viewModel.isMutedByCurrentUser ? "bell.fill" : "bell.slash"
+                        )
+                    }
+                    .disabled(viewModel.isUpdatingMute || viewModel.isDeletingThread)
+
+                    Button(role: .destructive) {
+                        isShowingDeleteConfirmation = true
+                    } label: {
+                        Label("Delete Chat", systemImage: "trash")
+                    }
+                    .disabled(viewModel.isDeletingThread)
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .accessibilityLabel("Chat options")
+                .disabled(viewModel.isDeletingThread)
             }
         }
         .background(Theme.appBackground)
@@ -121,12 +145,34 @@ struct ChatDetailView: View {
                 selectedProjectTab = .messages
             }
         }
+        .onChange(of: viewModel.didDeleteThread) { _, didDelete in
+            if didDelete {
+                dismiss()
+            }
+        }
         .alert(presentedError ?? "", isPresented: Binding(
             get: { presentedError != nil },
             set: { newValue in if !newValue { presentedError = nil } }
         ), actions: {
             Button("OK", role: .cancel) { presentedError = nil }
         })
+        .confirmationDialog(
+            "Delete this chat?",
+            isPresented: $isShowingDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Delete Chat", role: .destructive) {
+                isShowingDeleteConfirmation = false
+                Task { await viewModel.deleteThread() }
+            }
+            .disabled(viewModel.isDeletingThread)
+
+            Button("Cancel", role: .cancel) {
+                isShowingDeleteConfirmation = false
+            }
+        } message: {
+            Text("This removes the chat from your inbox.")
+        }
         .task {
             await viewModel.refreshThread()
         }

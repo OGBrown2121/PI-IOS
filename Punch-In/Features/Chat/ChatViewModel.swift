@@ -37,11 +37,15 @@ final class ChatViewModel: ObservableObject {
     }
 
     var filteredThreads: [ChatThread] {
+        let visibleThreads = threads.filter { thread in
+            !thread.isDeleted(by: currentUserId)
+        }
+
         let trimmedQuery = threadSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedQuery.isEmpty else { return threads }
+        guard !trimmedQuery.isEmpty else { return visibleThreads }
         let loweredQuery = trimmedQuery.lowercased()
 
-        return threads.filter { thread in
+        return visibleThreads.filter { thread in
             let nameMatch = thread.displayName(currentUserId: currentUserParticipant?.id).lowercased().contains(loweredQuery)
             let messageMatch = thread.lastMessagePreview?.lowercased().contains(loweredQuery) ?? false
             return nameMatch || messageMatch
@@ -67,10 +71,55 @@ final class ChatViewModel: ObservableObject {
     }
 
     func handleThreadUpdate(_ thread: ChatThread) {
+        if let currentUserId = currentUserParticipant?.id, thread.isDeleted(by: currentUserId) {
+            threads.removeAll { $0.id == thread.id }
+            return
+        }
         if let index = threads.firstIndex(where: { $0.id == thread.id }) {
             threads[index] = thread
         } else {
             threads.insert(thread, at: 0)
+        }
+    }
+
+    func removeThread(withId id: String) {
+        threads.removeAll { $0.id == id }
+    }
+
+    @discardableResult
+    func toggleMute(for thread: ChatThread) async -> Bool? {
+        guard let currentUserId = currentUserParticipant?.id else {
+            errorMessage = "You need an active profile to manage notifications."
+            return nil
+        }
+
+        let shouldMute = !thread.isMuted(by: currentUserId)
+        errorMessage = nil
+        do {
+            let updated = try await chatService.setThreadMuted(threadId: thread.id, isMuted: shouldMute)
+            handleThreadUpdate(updated)
+            return updated.isMuted(by: currentUserId)
+        } catch {
+            errorMessage = error.localizedDescription
+            return nil
+        }
+    }
+
+    @discardableResult
+    func deleteThread(_ thread: ChatThread) async -> Bool {
+        guard currentUserParticipant?.id != nil else {
+            errorMessage = "You need an active profile to manage chats."
+            return false
+        }
+
+        errorMessage = nil
+        do {
+            try await chatService.deleteThread(threadId: thread.id)
+            removeThread(withId: thread.id)
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
         }
     }
 

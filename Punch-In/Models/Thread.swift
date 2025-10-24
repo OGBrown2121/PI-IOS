@@ -177,6 +177,8 @@ struct ChatThread: Identifiable, Equatable {
     var lastMessageAt: Date?
     var messages: [ChatMessage]
     var project: Project?
+    var mutedParticipantIds: Set<String>
+    var deletedParticipantIds: Set<String>
 
     init(
         id: String = UUID().uuidString,
@@ -186,7 +188,9 @@ struct ChatThread: Identifiable, Equatable {
         groupSettings: GroupSettings? = nil,
         lastMessageAt: Date? = nil,
         messages: [ChatMessage] = [],
-        project: Project? = nil
+        project: Project? = nil,
+        mutedParticipantIds: Set<String> = [],
+        deletedParticipantIds: Set<String> = []
     ) {
         self.id = id
         self.creatorId = creatorId
@@ -196,6 +200,8 @@ struct ChatThread: Identifiable, Equatable {
         self.lastMessageAt = lastMessageAt
         self.messages = messages
         self.project = project
+        self.mutedParticipantIds = mutedParticipantIds
+        self.deletedParticipantIds = deletedParticipantIds
     }
 
     var isGroup: Bool { kind.isGroupLike }
@@ -261,6 +267,28 @@ struct ChatThread: Identifiable, Equatable {
     func updating(project: Project?) -> ChatThread {
         var copy = self
         copy.project = project
+        return copy
+    }
+
+    func isMuted(by participantId: String?) -> Bool {
+        guard let participantId else { return false }
+        return mutedParticipantIds.contains(participantId)
+    }
+
+    func isDeleted(by participantId: String?) -> Bool {
+        guard let participantId else { return false }
+        return deletedParticipantIds.contains(participantId)
+    }
+
+    func updatingMutedParticipantIds(_ ids: Set<String>) -> ChatThread {
+        var copy = self
+        copy.mutedParticipantIds = ids
+        return copy
+    }
+
+    func updatingDeletedParticipantIds(_ ids: Set<String>) -> ChatThread {
+        var copy = self
+        copy.deletedParticipantIds = ids
         return copy
     }
 }
