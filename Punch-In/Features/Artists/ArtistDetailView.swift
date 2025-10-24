@@ -1034,6 +1034,8 @@ struct ArtistDetailView: View {
 
     private struct ProfileBookingFlowView: View {
         @Environment(\.dismiss) private var dismiss
+        @Environment(\.di) private var di
+        @EnvironmentObject private var appState: AppState
         let context: BookingActionContext
         let openURLAction: OpenURLAction
         let onCopy: (String) -> Void
@@ -1041,10 +1043,13 @@ struct ArtistDetailView: View {
 
         @State private var startDate = ProfileBookingFlowView.defaultStartDate()
         @State private var durationMinutes: Int
-        @State private var location: String = ""
-        @State private var budget: String = ""
-        @State private var notes: String = ""
+        @State private var location: String
+        @State private var budget: String
+        @State private var notes: String
         @State private var showMissingContactAlert = false
+        @State private var isSubmittingRequest = false
+        @State private var submissionError: String?
+        private let prefillValues: PrefillValues
 
         init(
             context: BookingActionContext,
@@ -1056,7 +1061,12 @@ struct ArtistDetailView: View {
             self.openURLAction = openURLAction
             self.onCopy = onCopy
             self.onUnavailable = onUnavailable
-            _durationMinutes = State(initialValue: context.action.bookingFlow.defaultDurationMinutes)
+            let prefill = Self.resolvePrefillValues(for: context)
+            self.prefillValues = prefill
+            _durationMinutes = State(initialValue: prefill.durationMinutes)
+            _location = State(initialValue: prefill.location)
+            _budget = State(initialValue: prefill.budget)
+            _notes = State(initialValue: prefill.projectDetails)
         }
 
         var body: some View {
@@ -1087,9 +1097,32 @@ struct ArtistDetailView: View {
 
                     if context.action.bookingFlow.includesLocation {
                         Section(context.action.bookingFlow.locationLabel) {
-                            TextField("Add location details", text: $location)
-                                .textInputAutocapitalization(.words)
-                                .disableAutocorrection(true)
+                            if isVideographer {
+                                ZStack(alignment: .topLeading) {
+                                    TextEditor(text: $location)
+                                        .frame(minHeight: 120)
+                                        .padding(.top, 4)
+                                    if location.isEmpty {
+                                        Text("List each possible shoot address or area on its own line.")
+                                            .foregroundStyle(.secondary)
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 12)
+                                            .allowsHitTesting(false)
+                                    }
+                                }
+                                Text("Add one location per line so they know where you’d like to film.")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                TextField("Add location details", text: $location)
+                                    .textInputAutocapitalization(.words)
+                                    .disableAutocorrection(true)
+                            }
+                            if isUsingPrefilledLocation {
+                                Text("Suggested by \(providedByName)")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
 
@@ -1097,10 +1130,20 @@ struct ArtistDetailView: View {
                         Section(context.action.bookingFlow.budgetLabel) {
                             TextField("Optional", text: $budget)
                                 .keyboardType(.numbersAndPunctuation)
+                            if isUsingPrefilledBudget {
+                                Text("Suggested by \(providedByName)")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
 
                     Section("Project details") {
+                        if isUsingPrefilledNotes {
+                            Text("Template shared by \(providedByName). Update it with your project specifics.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
                         ZStack(alignment: .topLeading) {
                             TextEditor(text: $notes)
                                 .frame(minHeight: 140)
@@ -1115,35 +1158,46 @@ struct ArtistDetailView: View {
                         }
                     }
 
-                    Section("Contact") {
-                        if contactMethods.isEmpty {
-                            Text("This profile hasn’t shared direct contact info yet.")
+                    if let gearNote = videographerSettings?.gearRequirements, gearNote.trimmed.isEmpty == false {
+                        Section("Gear requirements") {
+                            Text(gearNote)
+                            Text("Provided by \(providedByName)")
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
-                        } else {
-                            ForEach(contactMethods, id: \.self) { method in
-                                switch method {
-                                case .email(let value):
-                                    Button {
-                                        openEmail(value, summary: requestSummary())
-                                    } label: {
-                                        Label("Email", systemImage: "envelope.fill")
-                                    }
-                                    Button {
-                                        copyToClipboard(value, description: "Email address")
-                                    } label: {
-                                        Label("Copy email", systemImage: "doc.on.doc")
-                                    }
-                                case .phone(let value):
-                                    Button {
-                                        messageNumber(value)
-                                    } label: {
-                                        Label("Message", systemImage: "bubble.left.and.bubble.right.fill")
-                                    }
-                                    Button {
-                                        copyToClipboard(value, description: "Phone number")
-                                    } label: {
-                                        Label("Copy phone", systemImage: "doc.on.doc")
+                        }
+                    }
+
+                    if isVideographer == false {
+                        Section("Contact") {
+                            if contactMethods.isEmpty {
+                                Text("This profile hasn’t shared direct contact info yet.")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                ForEach(contactMethods, id: \.self) { method in
+                                    switch method {
+                                    case .email(let value):
+                                        Button {
+                                            openEmail(value, summary: requestSummary())
+                                        } label: {
+                                            Label("Email", systemImage: "envelope.fill")
+                                        }
+                                        Button {
+                                            copyToClipboard(value, description: "Email address")
+                                        } label: {
+                                            Label("Copy email", systemImage: "doc.on.doc")
+                                        }
+                                    case .phone(let value):
+                                        Button {
+                                            messageNumber(value)
+                                        } label: {
+                                            Label("Message", systemImage: "bubble.left.and.bubble.right.fill")
+                                        }
+                                        Button {
+                                            copyToClipboard(value, description: "Phone number")
+                                        } label: {
+                                            Label("Copy phone", systemImage: "doc.on.doc")
+                                        }
                                     }
                                 }
                             }
@@ -1151,10 +1205,15 @@ struct ArtistDetailView: View {
                     }
 
                     Section {
-                        PrimaryButton(title: context.action.bookingFlow.submitButtonTitle) {
-                            prepareRequest()
+                        PrimaryButton(title: submitButtonTitle) {
+                            Task { await handleSubmit() }
                         }
-                        .disabled(contactMethods.isEmpty)
+                        .disabled(isSubmitDisabled)
+                        if let submissionError {
+                            Text(submissionError)
+                                .font(.footnote)
+                                .foregroundStyle(.red)
+                        }
                     }
                     .listRowBackground(Color.clear)
                 }
@@ -1171,12 +1230,108 @@ struct ArtistDetailView: View {
                     Text("This profile hasn’t listed a way to get in touch yet.")
                 }
                 .onAppear { handleOnAppear() }
+                .onChange(of: location) { _ in submissionError = nil }
+                .onChange(of: notes) { _ in submissionError = nil }
+                .onChange(of: startDate) { _ in submissionError = nil }
+                .onChange(of: durationMinutes) { _ in submissionError = nil }
             }
         }
 
         private enum ContactMethod: Hashable {
             case email(String)
             case phone(String)
+        }
+
+        private var videographerSettings: VideographerSettings? {
+            guard context.profile.accountType == .videographer else { return nil }
+            let settings = context.profile.videographerSettings
+            return settings.hasCustomizations ? settings : nil
+        }
+
+        private var isVideographer: Bool {
+            context.profile.accountType == .videographer
+        }
+
+        private var isUsingPrefilledLocation: Bool {
+            prefillValues.hasLocation && location == prefillValues.location
+        }
+
+        private var isUsingPrefilledBudget: Bool {
+            prefillValues.hasBudget && budget == prefillValues.budget
+        }
+
+        private var isUsingPrefilledNotes: Bool {
+            prefillValues.hasProjectDetails && notes == prefillValues.projectDetails
+        }
+
+        private var providedByName: String {
+            let name = context.profile.displayName.trimmed
+            return name.isEmpty ? "the creator" : name
+        }
+
+        private var sanitizedShootLocations: [String] {
+            let cleaned = location
+                .components(separatedBy: CharacterSet.newlines)
+                .map { $0.trimmed }
+                .filter { $0.isEmpty == false }
+                .map { String($0.prefix(200)) }
+            return Array(cleaned.prefix(12))
+        }
+
+        private var trimmedProjectDetails: String {
+            let value = notes.trimmed
+            return String(value.prefix(4000))
+        }
+
+        private func resolvedRequesterNames(for profile: UserProfile) -> (display: String, username: String) {
+            let trimmedDisplay = profile.displayName.trimmed
+            let displayName = trimmedDisplay.isEmpty ? "@\(profile.username)" : trimmedDisplay
+            return (displayName, profile.username)
+        }
+
+        private var submitButtonTitle: String {
+            if isSubmittingRequest {
+                return isVideographer ? "Sending..." : "Submitting..."
+            }
+            return context.action.bookingFlow.submitButtonTitle
+        }
+
+        private var isSubmitDisabled: Bool {
+            if isSubmittingRequest { return true }
+            if isVideographer { return false }
+            return contactMethods.isEmpty
+        }
+
+        private static func resolvePrefillValues(for context: BookingActionContext) -> PrefillValues {
+            let defaults = context.action.bookingFlow
+            guard context.profile.accountType == .videographer else {
+                return PrefillValues(
+                    durationMinutes: defaults.defaultDurationMinutes,
+                    location: "",
+                    budget: "",
+                    projectDetails: ""
+                )
+            }
+            let settings = context.profile.videographerSettings
+            let options = defaults.durationOptions
+            let selectedDuration = settings.defaultProductionLengthMinutes.flatMap { options.contains($0) ? $0 : nil } ?? defaults.defaultDurationMinutes
+            return PrefillValues(
+                durationMinutes: selectedDuration,
+                location: settings.defaultLocationNote.trimmed,
+                budget: settings.defaultBudgetNote.trimmed,
+                projectDetails: settings.projectDetailsTemplate
+            )
+        }
+
+        private struct PrefillValues {
+            let durationMinutes: Int
+            let location: String
+            let budget: String
+            let projectDetails: String
+
+            var hasLocation: Bool { location.trimmed.isEmpty == false }
+            var hasBudget: Bool { budget.trimmed.isEmpty == false }
+            var hasProjectDetails: Bool { projectDetails.trimmed.isEmpty == false }
         }
 
         private static func defaultStartDate() -> Date {
@@ -1199,6 +1354,51 @@ struct ArtistDetailView: View {
                 return "\(hrs)h"
             default:
                 return "\(hours)h \(remainingMinutes)m"
+            }
+        }
+
+        @MainActor
+        private func handleSubmit() async {
+            submissionError = nil
+            if isVideographer {
+                await submitVideoProjectRequest()
+            } else {
+                prepareRequest()
+            }
+        }
+
+        @MainActor
+        private func submitVideoProjectRequest() async {
+            guard isSubmittingRequest == false else { return }
+            guard let currentUser = appState.currentUser else {
+                submissionError = "You need an account to send a request."
+                return
+            }
+
+            isSubmittingRequest = true
+            defer { isSubmittingRequest = false }
+
+            let (displayName, username) = resolvedRequesterNames(for: currentUser)
+            let request = VideoProjectRequest(
+                videographerId: context.profile.id,
+                requesterId: currentUser.id,
+                requesterDisplayName: displayName,
+                requesterUsername: username,
+                startDate: startDate,
+                durationMinutes: durationMinutes,
+                shootLocations: sanitizedShootLocations,
+                projectDetails: trimmedProjectDetails,
+                status: .pending,
+                createdAt: Date(),
+                updatedAt: Date()
+            )
+
+            do {
+                try await di.firestoreService.createVideoProjectRequest(request)
+                onCopy("Request sent! We'll notify the videographer in-app.")
+                dismiss()
+            } catch {
+                submissionError = error.localizedDescription
             }
         }
 
@@ -1235,6 +1435,9 @@ struct ArtistDetailView: View {
         }
 
         private func handleOnAppear() {
+            if isVideographer {
+                return
+            }
             if contactMethods.isEmpty {
                 onUnavailable()
                 showMissingContactAlert = true
@@ -1292,6 +1495,12 @@ struct ArtistDetailView: View {
                 lines.append("")
                 lines.append("Details:")
                 lines.append(trimmedNotes)
+            }
+
+            if let gearNote = videographerSettings?.gearRequirements.trimmed, gearNote.isEmpty == false {
+                lines.append("")
+                lines.append("Gear requirements from \(providedByName):")
+                lines.append(gearNote)
             }
 
             return lines.joined(separator: "\n")

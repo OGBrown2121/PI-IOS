@@ -342,9 +342,9 @@ enum AccountType: String, CaseIterable, Identifiable, Codable, Equatable {
                     durationOptions: [120, 180, 240, 360],
                     defaultDurationMinutes: 240,
                     includesLocation: true,
-                    locationLabel: "Shoot location",
-                    includesBudget: true,
-                    budgetLabel: "Budget (optional)",
+                    locationLabel: "Shoot locations",
+                    includesBudget: false,
+                    budgetLabel: "",
                     notesPlaceholder: "Describe the storyline, references, crew needs, and post-production expectations.",
                     submitButtonTitle: "Send Video Request",
                     emailSubject: "Videography Booking Request"

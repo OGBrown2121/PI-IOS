@@ -24,6 +24,7 @@ enum FirestoreServiceError: LocalizedError {
     case roomNotFound
     case availabilityNotFound
     case beatDownloadRequestNotFound
+    case videoProjectRequestNotFound
 
     var errorDescription: String? {
         switch self {
@@ -39,6 +40,8 @@ enum FirestoreServiceError: LocalizedError {
             return "We couldn't locate the availability entry."
         case .beatDownloadRequestNotFound:
             return "That download request no longer exists."
+        case .videoProjectRequestNotFound:
+            return "This project request is no longer available."
         }
     }
 }
@@ -117,6 +120,12 @@ protocol FirestoreService {
     func observeBookings(for participantId: String, role: BookingParticipantRole) -> AsyncThrowingStream<[Booking], Error>
     func createBooking(_ booking: Booking) async throws
     func updateBooking(_ booking: Booking) async throws
+
+    func createVideoProjectRequest(_ request: VideoProjectRequest) async throws
+    func fetchVideoProjectRequests(for videographerId: String) async throws -> [VideoProjectRequest]
+    func fetchVideoProjectRequestsForRequester(_ requesterId: String) async throws -> [VideoProjectRequest]
+    func updateVideoProjectRequest(_ request: VideoProjectRequest) async throws
+    func deleteVideoProjectRequest(_ requestId: String) async throws
 
     func fetchReviews(for revieweeId: String, kind: ReviewSubjectKind) async throws -> [Review]
     func fetchReviewsAuthored(by reviewerId: String) async throws -> [Review]
@@ -253,6 +262,28 @@ struct FirebaseFirestoreService: FirestoreService {
         }
 
         data["engineerSettings"] = engineerSettingsData
+
+        if profile.videographerSettings.hasCustomizations {
+            var videographerSettingsData: [String: Any] = [:]
+            if let defaultLength = profile.videographerSettings.defaultProductionLengthMinutes {
+                videographerSettingsData["defaultProductionLengthMinutes"] = defaultLength
+            }
+            if profile.videographerSettings.defaultLocationNote.trimmed.isEmpty == false {
+                videographerSettingsData["defaultLocationNote"] = profile.videographerSettings.defaultLocationNote
+            }
+            if profile.videographerSettings.defaultBudgetNote.trimmed.isEmpty == false {
+                videographerSettingsData["defaultBudgetNote"] = profile.videographerSettings.defaultBudgetNote
+            }
+            if profile.videographerSettings.projectDetailsTemplate.trimmed.isEmpty == false {
+                videographerSettingsData["projectDetailsTemplate"] = profile.videographerSettings.projectDetailsTemplate
+            }
+            if profile.videographerSettings.gearRequirements.trimmed.isEmpty == false {
+                videographerSettingsData["gearRequirements"] = profile.videographerSettings.gearRequirements
+            }
+            data["videographerSettings"] = videographerSettingsData
+        } else {
+            data["videographerSettings"] = FieldValue.delete()
+        }
 
         if let profileImageURL = profile.profileImageURL?.absoluteString {
             data["profileImageURL"] = profileImageURL
@@ -1294,6 +1325,57 @@ struct FirebaseFirestoreService: FirestoreService {
         try await reference.setData(payload, merge: true)
     }
 
+    func createVideoProjectRequest(_ request: VideoProjectRequest) async throws {
+        let reference = database.collection("videoProjectRequests").document(request.id)
+        let payload = encodeVideoProjectRequest(request)
+        try await reference.setData(payload)
+    }
+
+    func fetchVideoProjectRequests(for videographerId: String) async throws -> [VideoProjectRequest] {
+        let snapshot = try await database
+            .collection("videoProjectRequests")
+            .whereField("videographerId", isEqualTo: videographerId)
+            .order(by: "createdAt", descending: true)
+            .getDocuments()
+
+        return snapshot.documents.compactMap { decodeVideoProjectRequest(documentID: $0.documentID, data: $0.data()) }
+    }
+
+    func fetchVideoProjectRequestsForRequester(_ requesterId: String) async throws -> [VideoProjectRequest] {
+        let snapshot = try await database
+            .collection("videoProjectRequests")
+            .whereField("requesterId", isEqualTo: requesterId)
+            .order(by: "createdAt", descending: true)
+            .getDocuments()
+
+        return snapshot.documents.compactMap { decodeVideoProjectRequest(documentID: $0.documentID, data: $0.data()) }
+    }
+
+    func updateVideoProjectRequest(_ request: VideoProjectRequest) async throws {
+        let reference = database.collection("videoProjectRequests").document(request.id)
+        var payload = encodeVideoProjectRequest(request)
+        if request.quotedHourlyRate == nil {
+            payload["quotedHourlyRate"] = FieldValue.delete()
+        }
+        if request.videographerRespondedAt == nil {
+            payload["videographerRespondedAt"] = FieldValue.delete()
+        }
+        if request.requesterDecisionAt == nil {
+            payload["requesterApprovedQuoteAt"] = FieldValue.delete()
+        }
+        if request.decisionAt == nil {
+            payload["decisionAt"] = FieldValue.delete()
+        }
+        if request.decisionBy == nil {
+            payload["decisionBy"] = FieldValue.delete()
+        }
+        try await reference.setData(payload, merge: true)
+    }
+
+    func deleteVideoProjectRequest(_ requestId: String) async throws {
+        try await database.collection("videoProjectRequests").document(requestId).delete()
+    }
+
     func fetchReviews(for revieweeId: String, kind: ReviewSubjectKind) async throws -> [Review] {
         let snapshot = try await database
             .collection("reviews")
@@ -1822,6 +1904,7 @@ private func decodeProfileMediaCollaborators(_ raw: Any?) -> [ProfileMediaCollab
         let profileImageURL = (data["profileImageURL"] as? String).flatMap(URL.init(string:))
         let contactData = data["contact"] as? [String: Any] ?? [:]
         let engineerSettingsData = data["engineerSettings"] as? [String: Any] ?? [:]
+        let videographerSettingsData = data["videographerSettings"] as? [String: Any] ?? [:]
         let drivePlanRaw = data["drivePlan"] as? String ?? UserProfile.DrivePlan.free.rawValue
         let drivePlan = UserProfile.DrivePlan(rawValue: drivePlanRaw) ?? .free
 
@@ -1837,6 +1920,13 @@ private func decodeProfileMediaCollaborators(_ raw: Any?) -> [ProfileMediaCollab
             allowOtherStudios: engineerSettingsData["allowOtherStudios"] as? Bool ?? false,
             mainStudioSelectedAt: (engineerSettingsData["mainStudioSelectedAt"] as? Timestamp)?.dateValue(),
             defaultSessionDurationMinutes: engineerSettingsData["defaultSessionDurationMinutes"] as? Int ?? 120
+        )
+        let videographerSettings = VideographerSettings(
+            defaultProductionLengthMinutes: videographerSettingsData["defaultProductionLengthMinutes"] as? Int,
+            defaultLocationNote: videographerSettingsData["defaultLocationNote"] as? String ?? "",
+            defaultBudgetNote: videographerSettingsData["defaultBudgetNote"] as? String ?? "",
+            projectDetailsTemplate: videographerSettingsData["projectDetailsTemplate"] as? String ?? "",
+            gearRequirements: videographerSettingsData["gearRequirements"] as? String ?? ""
         )
 
         let upcomingProjects = decodeProfileSpotlights(
@@ -1866,6 +1956,7 @@ private func decodeProfileMediaCollaborators(_ raw: Any?) -> [ProfileMediaCollab
             profileDetails: details,
             contact: contact,
             engineerSettings: engineerSettings,
+            videographerSettings: videographerSettings,
             drivePlan: drivePlan
         )
     }
@@ -2205,6 +2296,116 @@ private func decodeProfileMediaCollaborators(_ raw: Any?) -> [ProfileMediaCollab
         return data
     }
 
+    private func encodeVideoProjectRequest(_ request: VideoProjectRequest) -> [String: Any] {
+        var data: [String: Any] = [
+            "videographerId": request.videographerId,
+            "requesterId": request.requesterId,
+            "requesterDisplayName": request.requesterDisplayName,
+            "requesterUsername": request.requesterUsername,
+            "startDate": Timestamp(date: request.startDate),
+            "durationMinutes": request.durationMinutes,
+            "shootLocations": request.shootLocations,
+            "projectDetails": request.projectDetails,
+            "status": request.status.rawValue,
+            "createdAt": Timestamp(date: request.createdAt),
+            "updatedAt": Timestamp(date: request.updatedAt)
+        ]
+
+        if let rate = request.quotedHourlyRate {
+            data["quotedHourlyRate"] = rate
+        }
+
+        if let decisionAt = request.decisionAt {
+            data["decisionAt"] = Timestamp(date: decisionAt)
+        }
+
+        if let decisionBy = request.decisionBy {
+            data["decisionBy"] = decisionBy
+        }
+
+        if let conversationId = request.conversationId {
+            data["conversationId"] = conversationId
+        }
+
+        if let respondedAt = request.videographerRespondedAt {
+            data["videographerRespondedAt"] = Timestamp(date: respondedAt)
+        }
+
+        if let requesterDecisionAt = request.requesterDecisionAt {
+            data["requesterApprovedQuoteAt"] = Timestamp(date: requesterDecisionAt)
+        }
+
+        return data
+    }
+
+    private func decodeVideoProjectRequest(documentID: String, data: [String: Any]) -> VideoProjectRequest? {
+        guard
+            let videographerId = data["videographerId"] as? String,
+            let requesterId = data["requesterId"] as? String,
+            let requesterDisplayName = data["requesterDisplayName"] as? String,
+            let requesterUsername = data["requesterUsername"] as? String,
+            let startTimestamp = data["startDate"] as? Timestamp,
+            let durationValue = data["durationMinutes"],
+            let statusRaw = data["status"] as? String,
+            let createdAtTimestamp = data["createdAt"] as? Timestamp,
+            let updatedAtTimestamp = data["updatedAt"] as? Timestamp
+        else {
+            return nil
+        }
+
+        let status: VideoProjectRequestStatus
+        if let resolvedStatus = VideoProjectRequestStatus(rawValue: statusRaw) {
+            status = resolvedStatus
+        } else if statusRaw == "accepted" {
+            status = .scheduled
+        } else if statusRaw == "awaitingRequesterApproval" {
+            status = .awaitingRequesterDecision
+        } else {
+            return nil
+        }
+
+        let durationMinutes: Int
+        if let intValue = durationValue as? Int {
+            durationMinutes = intValue
+        } else if let doubleValue = durationValue as? Double {
+            durationMinutes = Int(doubleValue)
+        } else if let number = durationValue as? NSNumber {
+            durationMinutes = number.intValue
+        } else {
+            return nil
+        }
+
+        let shootLocations = (data["shootLocations"] as? [String])?.map { $0 } ?? []
+        let projectDetails = data["projectDetails"] as? String ?? ""
+        let quotedRate = (data["quotedHourlyRate"] as? Double) ?? (data["quotedHourlyRate"] as? NSNumber)?.doubleValue
+        let decisionAt = (data["decisionAt"] as? Timestamp)?.dateValue()
+        let decisionBy = data["decisionBy"] as? String
+        let conversationId = data["conversationId"] as? String
+        let videographerRespondedAt = (data["videographerRespondedAt"] as? Timestamp)?.dateValue()
+        let requesterDecisionAt = (data["requesterApprovedQuoteAt"] as? Timestamp)?.dateValue()
+
+        return VideoProjectRequest(
+            id: documentID,
+            videographerId: videographerId,
+            requesterId: requesterId,
+            requesterDisplayName: requesterDisplayName,
+            requesterUsername: requesterUsername,
+            startDate: startTimestamp.dateValue(),
+            durationMinutes: durationMinutes,
+            shootLocations: shootLocations,
+            projectDetails: projectDetails,
+            quotedHourlyRate: quotedRate,
+            status: status,
+            createdAt: createdAtTimestamp.dateValue(),
+            updatedAt: updatedAtTimestamp.dateValue(),
+            decisionAt: decisionAt,
+            decisionBy: decisionBy,
+            conversationId: conversationId,
+            videographerRespondedAt: videographerRespondedAt,
+            requesterDecisionAt: requesterDecisionAt
+        )
+    }
+
     private func decodeBooking(documentID: String, data: [String: Any]) -> Booking {
         let statusRaw = data["status"] as? String ?? BookingStatus.pending.rawValue
         let approvalData = data["approval"] as? [String: Any] ?? [:]
@@ -2306,10 +2507,11 @@ final class MockFirestoreService: FirestoreService {
     private var followersByUser: [String: Set<String>] = [:]
     private var mediaLibraryStore: [String: [ProfileMediaItem]] = [:]
     private var radioLikesStore: [String: [String: RadioLike]] = [:]
-   private var userRadioLikesStore: [String: [String: RadioLike]] = [:]
-   private var radioQueueStore: [String: ProfileMediaItem] = [:]
-   private var userReportsStore: [UserReport] = []
-   private var mediaReportsStore: [MediaReport] = []
+    private var userRadioLikesStore: [String: [String: RadioLike]] = [:]
+    private var radioQueueStore: [String: ProfileMediaItem] = [:]
+    private var userReportsStore: [UserReport] = []
+    private var mediaReportsStore: [MediaReport] = []
+    private var videoProjectRequestsStore: [String: VideoProjectRequest] = [:]
     private var beatCatalogStore: [String: [ProducerBeat]] = [:]
     private var beatDownloadRequestsStore: [BeatDownloadRequest] = []
 
@@ -2936,6 +3138,35 @@ final class MockFirestoreService: FirestoreService {
         }
         bookingsStore[booking.id] = booking
         notifyBookingStreams(for: booking)
+    }
+
+    func createVideoProjectRequest(_ request: VideoProjectRequest) async throws {
+        videoProjectRequestsStore[request.id] = request
+    }
+
+    func fetchVideoProjectRequests(for videographerId: String) async throws -> [VideoProjectRequest] {
+        videoProjectRequestsStore
+            .values
+            .filter { $0.videographerId == videographerId }
+            .sorted { $0.createdAt > $1.createdAt }
+    }
+
+    func fetchVideoProjectRequestsForRequester(_ requesterId: String) async throws -> [VideoProjectRequest] {
+        videoProjectRequestsStore
+            .values
+            .filter { $0.requesterId == requesterId }
+            .sorted { $0.createdAt > $1.createdAt }
+    }
+
+    func updateVideoProjectRequest(_ request: VideoProjectRequest) async throws {
+        guard videoProjectRequestsStore[request.id] != nil else {
+            throw FirestoreServiceError.videoProjectRequestNotFound
+        }
+        videoProjectRequestsStore[request.id] = request
+    }
+
+    func deleteVideoProjectRequest(_ requestId: String) async throws {
+        videoProjectRequestsStore.removeValue(forKey: requestId)
     }
 
     func fetchReviews(for revieweeId: String, kind: ReviewSubjectKind) async throws -> [Review] {

@@ -13,11 +13,118 @@ struct ThreadsView: View {
     @State private var deepLinkedThread: ChatThread?
     @State private var threadPendingDeletion: ChatThread?
 
+    private var isPresentingErrorAlert: Binding<Bool> {
+        Binding(
+            get: { presentedError != nil },
+            set: { newValue in
+                if !newValue {
+                    presentedError = nil
+                }
+            }
+        )
+    }
+
+    private var isShowingDeleteDialog: Binding<Bool> {
+        Binding(
+            get: { threadPendingDeletion != nil },
+            set: { newValue in
+                if !newValue {
+                    threadPendingDeletion = nil
+                }
+            }
+        )
+    }
+
     init(viewModel: ChatViewModel) {
         _viewModel = StateObject(wrappedValue: viewModel)
     }
 
     var body: some View {
+        sheetConfiguredList
+            .onChange(of: viewModel.errorMessage) { _, newValue in
+                guard let newValue else { return }
+                presentedError = newValue
+            }
+            .onChange(of: appState.pendingChatThread) { _, newValue in
+                guard let newValue else { return }
+                viewModel.handleThreadUpdate(newValue)
+                deepLinkedThread = newValue
+                appState.pendingChatThread = nil
+            }
+            .onDisappear { toastDismissTask?.cancel() }
+    }
+
+    private var sheetConfiguredList: some View {
+        interactiveList
+            .sheet(isPresented: $isShowingAlerts) {
+                NavigationStack {
+                    AlertsView()
+                }
+            }
+            .sheet(isPresented: $viewModel.isPresentingNewChat) {
+                NavigationStack {
+                    NewChatView(viewModel: viewModel) { thread in
+                        viewModel.handleThreadUpdate(thread)
+                        showToast("Conversation created")
+                    }
+                }
+            }
+            .sheet(item: $deepLinkedThread) { thread in
+                NavigationStack {
+                    chatDetailDestination(for: thread)
+                }
+            }
+    }
+
+    private var interactiveList: some View {
+        searchableList
+            .toast(message: $toastMessage, bottomInset: 100)
+            .alert(
+                "Error",
+                isPresented: isPresentingErrorAlert,
+                presenting: presentedError
+            ) { _ in
+                Button("OK", role: .cancel) { presentedError = nil }
+            } message: { errorMessage in
+                Text(errorMessage)
+            }
+            .confirmationDialog(
+                "Delete this chat?",
+                isPresented: isShowingDeleteDialog,
+                titleVisibility: .visible
+            ) {
+                deleteConfirmationActions()
+            } message: {
+                Text("This removes the chat from your inbox.")
+            }
+    }
+
+    private var searchableList: some View {
+        navigationConfiguredList
+            .searchable(
+                text: $viewModel.threadSearchQuery,
+                placement: .navigationBarDrawer(displayMode: .always),
+                prompt: "Search chats"
+            )
+            .refreshable {
+                await viewModel.refresh()
+                await MainActor.run { showToast("Chats refreshed") }
+            }
+            .task {
+                await viewModel.refresh()
+            }
+    }
+
+    private var navigationConfiguredList: some View {
+        threadsList
+            .listStyle(.insetGrouped)
+            .navigationTitle("Messages")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar(.visible, for: .navigationBar)
+            .toolbar { toolbarContent }
+    }
+
+    private var threadsList: some View {
         List {
             if viewModel.isLoading && viewModel.filteredThreads.isEmpty {
                 loadingRow
@@ -31,87 +138,39 @@ struct ThreadsView: View {
                 }
             }
         }
-        .listStyle(.insetGrouped)
-        .navigationTitle("Messages")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar(.visible, for: .navigationBar)
-        .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                AlertsButton { isShowingAlerts = true }
-            }
-            ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    viewModel.presentNewChat()
-                } label: {
-                    Image(systemName: "square.and.pencil")
-                }
-                .accessibilityLabel("New chat")
-            }
-        }
-        .searchable(text: $viewModel.threadSearchQuery, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search chats")
-        .refreshable {
-            await viewModel.refresh()
-            await MainActor.run { showToast("Chats refreshed") }
-        }
-        .task {
-            await viewModel.refresh()
-        }
-        .toast(message: $toastMessage, bottomInset: 100)
-        .alert(presentedError ?? "", isPresented: Binding(
-            get: { presentedError != nil },
-            set: { newValue in if !newValue { presentedError = nil } }
-        ), actions: {
-            Button("OK", role: .cancel) { presentedError = nil }
-        })
-        .confirmationDialog(
-            "Delete this chat?",
-            item: $threadPendingDeletion,
-            titleVisibility: .visible
-        ) { thread in
+    }
+
+    @ViewBuilder
+    private func deleteConfirmationActions() -> some View {
+        if let pendingThread = threadPendingDeletion {
             Button("Delete Chat", role: .destructive) {
                 threadPendingDeletion = nil
                 Task { @MainActor in
-                    if await viewModel.deleteThread(thread) {
+                    if await viewModel.deleteThread(pendingThread) {
                         showToast("Chat deleted")
                     }
                 }
             }
+        }
 
-            Button("Cancel", role: .cancel) {
-                threadPendingDeletion = nil
+        Button("Cancel", role: .cancel) {
+            threadPendingDeletion = nil
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        ToolbarItem(placement: .topBarLeading) {
+            AlertsButton { isShowingAlerts = true }
+        }
+        ToolbarItem(placement: .topBarTrailing) {
+            Button {
+                viewModel.presentNewChat()
+            } label: {
+                Image(systemName: "square.and.pencil")
             }
-        } message: { _ in
-            Text("This removes the chat from your inbox.")
+            .accessibilityLabel("New chat")
         }
-        .sheet(isPresented: $isShowingAlerts) {
-            NavigationStack {
-                AlertsView()
-            }
-        }
-        .sheet(isPresented: $viewModel.isPresentingNewChat) {
-            NavigationStack {
-                NewChatView(viewModel: viewModel) { thread in
-                    viewModel.handleThreadUpdate(thread)
-                    showToast("Conversation created")
-                }
-            }
-        }
-        .sheet(item: $deepLinkedThread) { thread in
-            NavigationStack {
-                chatDetailDestination(for: thread)
-            }
-        }
-        .onChange(of: viewModel.errorMessage) { _, newValue in
-            guard let newValue else { return }
-            presentedError = newValue
-        }
-        .onChange(of: appState.pendingChatThread) { _, newValue in
-            guard let newValue else { return }
-            viewModel.handleThreadUpdate(newValue)
-            deepLinkedThread = newValue
-            appState.pendingChatThread = nil
-        }
-        .onDisappear { toastDismissTask?.cancel() }
     }
 
     private var loadingRow: some View {

@@ -1,5 +1,14 @@
 import SwiftUI
 
+private extension NumberFormatter {
+    static let inboxCurrency: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .currency
+        formatter.maximumFractionDigits = 2
+        return formatter
+    }()
+}
+
 struct BookingInboxView: View {
     @StateObject private var viewModel: BookingInboxViewModel
     @State private var isShowingAlerts = false
@@ -81,6 +90,9 @@ struct BookingInboxView: View {
                 allowPendingActions: true
             )
             .environmentObject(viewModel)
+        case .videographer:
+            VideographerInboxContent()
+                .environmentObject(viewModel)
         }
     }
 }
@@ -101,6 +113,7 @@ private struct InboxContent: View {
     @State private var reviewTask: BookingInboxViewModel.ReviewTask?
     @State private var bookingForDetails: Booking?
     @State private var showHistorySheet = false
+    @State private var selectedVideoRequest: VideoProjectRequest?
 
     var body: some View {
         VStack(spacing: 12) {
@@ -133,12 +146,14 @@ private struct InboxContent: View {
                     title: title,
                     subtitle: subtitle,
                     allowPendingActions: allowPendingActions,
+                    videoRequests: viewModel.viewerRole == .artist ? viewModel.sentVideoRequests : [],
                     onReschedule: { bookingToReschedule = $0 },
                     onCancel: { booking in
                         bookingToCancel = booking
                         showCancelDialog = true
                     },
-                    onSelect: { bookingForDetails = $0 }
+                    onSelect: { bookingForDetails = $0 },
+                    onSelectRequest: { selectedVideoRequest = $0 }
                 )
             case .schedule:
                 EngineerScheduleView()
@@ -198,6 +213,10 @@ private struct InboxContent: View {
         .sheet(item: $bookingForDetails) { booking in
             BookingDetailSheet(booking: booking)
         }
+        .sheet(item: $selectedVideoRequest) { request in
+            VideoProjectRequestDetailSheet(request: request)
+                .environmentObject(viewModel)
+        }
         .sheet(isPresented: $showHistorySheet) {
             PastSessionsLogView(onSelect: { booking in
                 bookingForDetails = booking
@@ -244,6 +263,1042 @@ private struct InboxContent: View {
         }
         .buttonStyle(.bordered)
         .padding(.horizontal)
+    }
+}
+
+private struct VideographerInboxContent: View {
+    @EnvironmentObject private var viewModel: BookingInboxViewModel
+    @State private var selectedRequest: VideoProjectRequest?
+
+    var body: some View {
+        List {
+            if let error = viewModel.errorMessage {
+                Section {
+                    Text(error)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
+            }
+            Section("Pending requests") {
+                if viewModel.pendingVideoRequests.isEmpty {
+                    Text("No new video requests yet.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    ForEach(viewModel.pendingVideoRequests) { request in
+                        VideoRequestRow(
+                            request: request,
+                            viewerRole: .videographer,
+                            displayName: viewModel.displayName(forUser: request.requesterId),
+                            scheduleLabel: viewModel.videoRequestScheduleLabel(for: request),
+                            createdLabel: viewModel.videoRequestCreatedLabel(for: request),
+                            durationLabel: viewModel.formattedDurationLabel(for: request.durationMinutes),
+                            isProcessing: viewModel.isProcessingVideoRequest(request),
+                            status: request.status,
+                            decisionLabel: viewModel.requesterDecisionLabel(for: request),
+                            onTap: { selectedRequest = request }
+                        )
+                    }
+                }
+            }
+
+            if viewModel.completedVideoRequests.isEmpty == false {
+                Section("Recently handled") {
+                    ForEach(viewModel.completedVideoRequests) { request in
+                        VideoRequestRow(
+                            request: request,
+                            viewerRole: .videographer,
+                            displayName: viewModel.displayName(forUser: request.requesterId),
+                            scheduleLabel: viewModel.videoRequestScheduleLabel(for: request),
+                            createdLabel: viewModel.videoRequestCreatedLabel(for: request),
+                            durationLabel: viewModel.formattedDurationLabel(for: request.durationMinutes),
+                            isProcessing: false,
+                            status: request.status,
+                            decisionLabel: viewModel.requesterDecisionLabel(for: request),
+                            onTap: { selectedRequest = request }
+                        )
+                    }
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .scrollContentBackground(.hidden)
+        .background(Theme.appBackground)
+        .sheet(item: $selectedRequest) { request in
+            VideoProjectRequestDetailSheet(request: request)
+                .environmentObject(viewModel)
+        }
+    }
+}
+
+private struct VideoRequestRow: View {
+    let request: VideoProjectRequest
+    let viewerRole: BookingInboxViewModel.ViewerRole
+    let displayName: String
+    let scheduleLabel: String
+    let createdLabel: String
+    let durationLabel: String
+    let isProcessing: Bool
+    let status: VideoProjectRequestStatus
+    let decisionLabel: String?
+    let onTap: () -> Void
+
+    private var trimmedProjectDetails: String {
+        request.projectDetails.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var locations: [String] {
+        request.shootLocations
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.isEmpty == false }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            header
+            Text("Duration: \(durationLabel)")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            if let rateText {
+                Label("Quote: \(rateText)", systemImage: "creditcard")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            if locations.isEmpty == false {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Shoot locations")
+                        .font(.subheadline.weight(.semibold))
+                    ForEach(locations, id: \.self) { location in
+                        Label(location, systemImage: "mappin.and.ellipse")
+                    }
+                }
+            }
+
+            if trimmedProjectDetails.isEmpty == false {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Project details")
+                        .font(.subheadline.weight(.semibold))
+                    Text(trimmedProjectDetails)
+                        .lineLimit(6)
+                }
+            }
+
+            Text("Requested \(createdLabel)")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+            statusSummary
+
+            if let decisionLabel, status == .scheduled {
+                let message = viewerRole == .artist
+                    ? "You accepted \(decisionLabel)"
+                    : "Requester accepted \(decisionLabel)"
+                Label(message, systemImage: "checkmark.seal")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.green)
+            } else if let decisionLabel, status == .declined {
+                let message = viewerRole == .artist
+                    ? "You declined \(decisionLabel)"
+                    : "Requester declined \(decisionLabel)"
+                Label(message, systemImage: "xmark.circle")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.red)
+            }
+
+            if viewerRole == .videographer && (status == .pending || status == .awaitingRequesterDecision) {
+                Button {
+                    onTap()
+                } label: {
+                    Label("Review & respond", systemImage: "doc.text.magnifyingglass")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isProcessing)
+
+                if isProcessing {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                        Text("Updating…")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            } else if viewerRole == .artist && status == .awaitingRequesterDecision {
+                Button {
+                    onTap()
+                } label: {
+                    Label("Review proposal", systemImage: "doc.text.magnifyingglass")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.orange)
+                .disabled(isProcessing)
+
+                if isProcessing {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                        Text("Updating…")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            } else {
+                Button {
+                    onTap()
+                } label: {
+                    Label("View details", systemImage: "info.circle")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+        .padding(.vertical, 6)
+        .contentShape(Rectangle())
+        .onTapGesture { onTap() }
+    }
+
+    private var header: some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(displayName)
+                    .font(.headline)
+                Text(scheduleLabel)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+    }
+
+    private var statusSummary: some View {
+        HStack(alignment: .firstTextBaseline) {
+            let (label, color, icon): (String, Color, String) = {
+                switch status {
+                case .scheduled:
+                    return ("Scheduled", .green, "calendar.circle.fill")
+                case .declined:
+                    return ("Declined", .red, "xmark.circle.fill")
+                case .awaitingRequesterDecision:
+                    if viewerRole == .artist {
+                        return ("Needs your decision", .orange, "exclamationmark.circle")
+                    } else {
+                        return ("Awaiting requester", .orange, "hourglass")
+                    }
+                case .pending:
+                    if viewerRole == .videographer {
+                        return ("Needs your response", .orange, "person.crop.circle.badge.exclamationmark")
+                    } else {
+                        return ("Pending", .secondary, "hourglass")
+                    }
+                }
+            }()
+            Label(label, systemImage: icon)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(color)
+            Spacer()
+            if let decisionLabel {
+                Text("Updated \(decisionLabel)")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var rateText: String? {
+        guard let rate = request.quotedHourlyRate else { return nil }
+        return NumberFormatter.inboxCurrency.string(from: NSNumber(value: rate))
+    }
+}
+
+private struct VideoProjectRequestDetailSheet: View {
+    @EnvironmentObject private var viewModel: BookingInboxViewModel
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.di) private var di
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var request: VideoProjectRequest
+    @State private var rateText: String
+    @State private var proposalStartDate: Date
+    @State private var proposalDurationMinutes: Int
+    @State private var isSendingProposal = false
+    @State private var isDecliningRequest = false
+    @State private var isAcceptingProposal = false
+    @State private var isDeletingRequest = false
+    @State private var isOpeningChat = false
+    @State private var chatThread: ChatThread?
+    @State private var errorMessage: String?
+    @State private var infoMessage: String?
+    private let durationOptions: [Int] = [30, 60, 90, 120, 180, 240]
+
+    init(request: VideoProjectRequest) {
+        _request = State(initialValue: request)
+        if let rate = request.quotedHourlyRate {
+            _rateText = State(initialValue: String(format: "%.2f", rate))
+        } else {
+            _rateText = State(initialValue: "")
+        }
+        _proposalStartDate = State(initialValue: request.startDate)
+        _proposalDurationMinutes = State(initialValue: request.durationMinutes)
+    }
+
+    private var isAwaitingRequesterDecision: Bool {
+        request.status == .awaitingRequesterDecision
+    }
+
+    private var isRequesterAwaitingAction: Bool {
+        viewerRole == .artist && isAwaitingRequesterDecision
+    }
+
+    private var isVideographerAwaitingAction: Bool {
+        isVideographer && (request.status == .pending || request.status == .awaitingRequesterDecision)
+    }
+
+    private var requesterDecisionLabel: String? {
+        guard let decisionAt = request.requesterDecisionAt else { return nil }
+        return viewModel.formattedTimestamp(decisionAt)
+    }
+
+    private var requesterDecisionSummary: (text: String, icon: String, color: Color)? {
+        guard let label = requesterDecisionLabel else { return nil }
+        switch request.status {
+        case .scheduled:
+            if isVideographer {
+                return ("\(requesterSentenceSubject) accepted \(label)", "checkmark.seal", .green)
+            } else {
+                return ("You accepted \(label)", "checkmark.seal", .green)
+            }
+        case .declined:
+            if isVideographer {
+                return ("\(requesterSentenceSubject) declined \(label)", "xmark.circle", .red)
+            } else {
+                return ("You declined \(label)", "xmark.circle", .red)
+            }
+        default:
+            return nil
+        }
+    }
+
+    private var videographerResponseLabel: String? {
+        guard let respondedAt = request.videographerRespondedAt else { return nil }
+        return viewModel.formattedTimestamp(respondedAt)
+    }
+
+    private var requesterNameDisplay: String {
+        let name = viewModel.displayName(forUser: request.requesterId).trimmed
+        return name.isEmpty ? "the requester" : name
+    }
+
+    private var videographerNameDisplay: String {
+        let name = viewModel.displayName(forUser: request.videographerId).trimmed
+        return name.isEmpty ? "the videographer" : name
+    }
+
+    private var requesterSentenceSubject: String {
+        requesterNameDisplay == "the requester" ? "The requester" : requesterNameDisplay
+    }
+
+    private var videographerSentenceSubject: String {
+        videographerNameDisplay == "the videographer" ? "The videographer" : videographerNameDisplay
+    }
+
+    private var chatCardTitle: String {
+        if isVideographer {
+            return "Discuss before deciding"
+        }
+        return isRequesterAwaitingAction ? "Need changes?" : "Conversation"
+    }
+
+    private var chatButtonTitle: String {
+        if isVideographer {
+            return "Message requester"
+        }
+        return isRequesterAwaitingAction ? "Message videographer" : "Open conversation"
+    }
+
+    private var chatHelperText: String? {
+        if isVideographer {
+            if isAwaitingRequesterDecision {
+                return "Send a message while you wait if any details need to be clarified."
+            }
+            return "Start a chat to clarify logistics before you respond."
+        }
+        if isRequesterAwaitingAction {
+            return "Ask questions or request changes before approving."
+        }
+        return nil
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 20) {
+                    summaryCard
+
+                    if isVideographerAwaitingAction {
+                        proposalEditorCard
+                    }
+
+                    if isRequesterAwaitingAction {
+                        requesterDecisionCard
+                    } else if viewerRole == .artist && request.status == .pending {
+                        requesterPendingInfoCard
+                    }
+
+                    if isVideographer == false, let quoteText = formattedQuote {
+                        quoteCard(quoteText)
+                    } else if isVideographer && request.status.isFinal, let quoteText = formattedQuote {
+                        quoteCard(quoteText)
+                    }
+
+                    locationsCard
+                    detailsCard
+
+                    if showChatButton {
+                        messageCard
+                    }
+
+                    if let infoMessage {
+                        infoCard(infoMessage)
+                    }
+
+                    if let errorMessage {
+                        errorCard(errorMessage)
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 24)
+            }
+            .background(Theme.appBackground)
+            .navigationTitle("Project request")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") { dismiss() }
+                }
+            }
+        }
+        .sheet(item: $chatThread) { thread in
+            NavigationStack {
+                ChatDetailView(
+                    viewModel: ChatDetailViewModel(
+                        thread: thread,
+                        chatService: di.chatService,
+                        storageService: di.storageService,
+                        appState: appState
+                    )
+                )
+            }
+        }
+        .onChange(of: rateText) { _, _ in
+            if isSendingProposal == false {
+                infoMessage = nil
+            }
+        }
+        .onChange(of: proposalStartDate) { _, _ in
+            if isSendingProposal == false {
+                infoMessage = nil
+            }
+        }
+        .onChange(of: proposalDurationMinutes) { _, _ in
+            if isSendingProposal == false {
+                infoMessage = nil
+            }
+        }
+    }
+
+    private var summaryCard: some View {
+        detailCard(title: "Summary") {
+            VStack(alignment: .leading, spacing: 10) {
+                Label(counterpartyLine, systemImage: "person")
+                Label(scheduleLabel, systemImage: "calendar")
+                Label("Duration: \(viewModel.formattedDurationLabel(for: request.durationMinutes))", systemImage: "clock")
+                Label("Requested \(createdLabel)", systemImage: "clock.arrow.circlepath")
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 8) {
+                    Image(systemName: statusDescriptor.icon)
+                        .foregroundStyle(statusDescriptor.color)
+                    Text(statusDescriptor.title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(statusDescriptor.color)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(statusDescriptor.color.opacity(0.15), in: Capsule())
+
+                if let responseLabel = videographerResponseLabel {
+                    let message = isVideographer
+                        ? "You responded \(responseLabel)"
+                        : "\(videographerSentenceSubject) responded \(responseLabel)"
+                    Label(message, systemImage: "paperplane")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+
+                if let summary = requesterDecisionSummary {
+                    Label(summary.text, systemImage: summary.icon)
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(summary.color)
+                }
+
+                if let quote = formattedQuote {
+                    Label("Current quote: \(quote)/hr", systemImage: "creditcard")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .font(.subheadline)
+        }
+    }
+
+    private var proposalEditorCard: some View {
+        detailCard(title: "Your proposal") {
+            VStack(alignment: .leading, spacing: 12) {
+                DatePicker("Start time", selection: $proposalStartDate, displayedComponents: [.date, .hourAndMinute])
+                    .datePickerStyle(.compact)
+
+                Picker("Duration", selection: $proposalDurationMinutes) {
+                    ForEach(durationOptions, id: \.self) { minutes in
+                        Text(viewModel.formattedDurationLabel(for: minutes)).tag(minutes)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                TextField("Hourly rate", text: $rateText)
+                    .keyboardType(.decimalPad)
+                    .disableAutocorrection(true)
+                    .textFieldStyle(.roundedBorder)
+
+                if let sample = formattedQuotePreview {
+                    Text("Will display as \(sample)")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                if request.status == .awaitingRequesterDecision {
+                    Text("Waiting for the requester’s decision. Send another update if you need to adjust the plan.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                Button {
+                    Task { await sendProposal() }
+                } label: {
+                    if isSendingProposal {
+                        HStack {
+                            ProgressView()
+                            Text("Sending…")
+                        }
+                        .frame(maxWidth: .infinity)
+                    } else {
+                        Label("Send proposal", systemImage: "paperplane.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isSendingProposal || isDecliningRequest)
+
+                Button(role: .destructive) {
+                    Task { await declineAsVideographer() }
+                } label: {
+                    if isDecliningRequest {
+                        HStack {
+                            ProgressView()
+                            Text("Declining…")
+                        }
+                        .frame(maxWidth: .infinity)
+                    } else {
+                        Label("Decline request", systemImage: "xmark.circle")
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(isSendingProposal || isDecliningRequest)
+            }
+        }
+    }
+
+    private var requesterDecisionCard: some View {
+        detailCard(title: "Review proposal") {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("\(videographerSentenceSubject) sent an updated proposal. Accept to schedule or decline to cancel the request.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
+                Button {
+                    Task { await acceptProposal() }
+                } label: {
+                    if isAcceptingProposal {
+                        HStack {
+                            ProgressView()
+                            Text("Accepting…")
+                        }
+                        .frame(maxWidth: .infinity)
+                    } else {
+                        Label("Accept proposal", systemImage: "checkmark.circle")
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isAcceptingProposal || isDeletingRequest || isOpeningChat)
+
+                Button(role: .destructive) {
+                    Task { await deleteRequest() }
+                } label: {
+                    if isDeletingRequest {
+                        HStack {
+                            ProgressView()
+                            Text("Declining…")
+                        }
+                        .frame(maxWidth: .infinity)
+                    } else {
+                        Label("Decline proposal", systemImage: "xmark.circle")
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(isDeletingRequest || isAcceptingProposal || isOpeningChat)
+            }
+        }
+    }
+
+    private var requesterPendingInfoCard: some View {
+        detailCard(title: "Awaiting response") {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Your request is waiting on the videographer. You can cancel if you no longer need it.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
+                Button(role: .destructive) {
+                    Task { await deleteRequest() }
+                } label: {
+                    if isDeletingRequest {
+                        HStack {
+                            ProgressView()
+                            Text("Cancelling…")
+                        }
+                        .frame(maxWidth: .infinity)
+                    } else {
+                        Label("Cancel request", systemImage: "trash")
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(isDeletingRequest)
+            }
+        }
+    }
+
+    private func quoteCard(_ quote: String) -> some View {
+        detailCard(title: "Quote") {
+            Text("\(quote)/hr")
+                .font(.title3.weight(.semibold))
+        }
+    }
+
+    private var locationsCard: some View {
+        detailCard(title: "Shoot locations") {
+            if request.shootLocations.isEmpty {
+                Text("No locations listed.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(request.shootLocations, id: \.self) { location in
+                        Label(location, systemImage: "mappin.and.ellipse")
+                            .foregroundStyle(.primary)
+                    }
+                }
+            }
+        }
+    }
+
+    private var detailsCard: some View {
+        detailCard(title: "Project details") {
+            if request.projectDetails.trimmed.isEmpty {
+                Text("No additional details provided.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text(request.projectDetails)
+                    .font(.body)
+            }
+        }
+    }
+
+    private var messageCard: some View {
+        detailCard(title: chatCardTitle) {
+            Button {
+                Task { await openChat() }
+            } label: {
+                if isOpeningChat {
+                    HStack {
+                        ProgressView()
+                        Text("Opening chat…")
+                    }
+                    .frame(maxWidth: .infinity)
+                } else {
+                    Label(chatButtonTitle, systemImage: "bubble.left.and.bubble.right")
+                        .frame(maxWidth: .infinity)
+                }
+            }
+            .buttonStyle(.bordered)
+            .disabled(isOpeningChat)
+
+            if let helper = chatHelperText {
+                Text(helper)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    private func infoCard(_ message: String) -> some View {
+        detailCard(title: "Info") {
+            Text(message)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func errorCard(_ message: String) -> some View {
+        detailCard(title: "Error") {
+            Text(message)
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.red)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func detailCard<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title)
+                .font(.headline.weight(.semibold))
+            content()
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(Theme.cardBackground)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(Theme.primaryColor.opacity(0.08), lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.05), radius: 12, y: 6)
+    }
+
+    private var scheduleLabel: String {
+        viewModel.videoRequestScheduleLabel(for: request)
+    }
+
+    private var createdLabel: String {
+        viewModel.videoRequestCreatedLabel(for: request)
+    }
+
+    private var formattedQuote: String? {
+        guard let rate = request.quotedHourlyRate else { return nil }
+        return NumberFormatter.inboxCurrency.string(from: NSNumber(value: rate))
+    }
+
+    private var formattedQuotePreview: String? {
+        guard let parsedRate = parsedRate else { return nil }
+        return NumberFormatter.inboxCurrency.string(from: NSNumber(value: parsedRate))
+    }
+
+    private var parsedRate: Double? {
+        let trimmed = rateText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else { return nil }
+        return Double(trimmed)
+    }
+
+    private var statusDescriptor: (title: String, color: Color, icon: String) {
+        switch request.status {
+        case .pending:
+            return ("Pending", .orange, "hourglass")
+        case .awaitingRequesterDecision:
+            return ("Awaiting requester decision", .orange, "exclamationmark.circle")
+        case .scheduled:
+            return ("Scheduled", .green, "checkmark.circle.fill")
+        case .declined:
+            return ("Declined", .red, "xmark.circle.fill")
+        }
+    }
+
+    private var isVideographer: Bool {
+        viewModel.viewerRole == .videographer
+    }
+
+    private var viewerRole: BookingInboxViewModel.ViewerRole {
+        viewModel.viewerRole
+    }
+
+    private var showChatButton: Bool {
+        if isRequesterAwaitingAction {
+            return false
+        }
+        return isVideographer || request.conversationId != nil
+    }
+
+    private var counterpartyLine: String {
+        let name = isVideographer
+            ? viewModel.displayName(forUser: request.requesterId)
+            : viewModel.displayName(forUser: request.videographerId)
+        return isVideographer ? "From \(name)" : "Videographer • \(name)"
+    }
+
+    private func sendProposal() async {
+        guard isVideographer else { return }
+        let trimmed = rateText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty == false && Double(trimmed) == nil {
+            await MainActor.run { errorMessage = "Enter a valid hourly rate." }
+            return
+        }
+
+        let newRate = trimmed.isEmpty ? nil : Double(trimmed)
+
+        await MainActor.run {
+            rateText = trimmed
+            errorMessage = nil
+            infoMessage = nil
+            isSendingProposal = true
+        }
+
+        await viewModel.sendVideoProjectProposal(
+            request,
+            startDate: proposalStartDate,
+            durationMinutes: proposalDurationMinutes,
+            shootLocations: request.shootLocations,
+            quotedRate: newRate
+        )
+
+        await MainActor.run {
+            defer { isSendingProposal = false }
+            if let globalError = viewModel.errorMessage {
+                errorMessage = globalError
+                return
+            }
+
+            request.startDate = proposalStartDate
+            request.durationMinutes = proposalDurationMinutes
+            request.quotedHourlyRate = newRate
+            request.status = .awaitingRequesterDecision
+            let now = Date()
+            request.videographerRespondedAt = now
+            request.updatedAt = now
+            request.requesterDecisionAt = nil
+            request.decisionAt = nil
+            request.decisionBy = nil
+            infoMessage = "Proposal sent to the requester."
+        }
+    }
+
+    private func declineAsVideographer() async {
+        guard isVideographer else { return }
+        guard isDecliningRequest == false else { return }
+
+        await MainActor.run {
+            errorMessage = nil
+            infoMessage = nil
+            isDecliningRequest = true
+        }
+
+        await viewModel.declineVideoProjectRequest(request)
+
+        await MainActor.run {
+            defer { isDecliningRequest = false }
+            if let globalError = viewModel.errorMessage {
+                errorMessage = globalError
+                return
+            }
+
+            request.status = .declined
+            let now = Date()
+            request.decisionAt = now
+            request.decisionBy = appState.currentUser?.id
+            request.requesterDecisionAt = nil
+            request.updatedAt = now
+            infoMessage = "Request declined."
+            dismiss()
+        }
+    }
+
+    private func acceptProposal() async {
+        guard isRequesterAwaitingAction else { return }
+        guard isAcceptingProposal == false else { return }
+
+        await MainActor.run {
+            errorMessage = nil
+            infoMessage = nil
+            isAcceptingProposal = true
+        }
+
+        await viewModel.acceptVideoProjectRequest(request)
+
+        await MainActor.run {
+            defer { isAcceptingProposal = false }
+            if let globalError = viewModel.errorMessage {
+                errorMessage = globalError
+                return
+            }
+
+            let now = Date()
+            request.status = .scheduled
+            request.requesterDecisionAt = now
+            request.decisionAt = now
+            request.decisionBy = appState.currentUser?.id
+            request.updatedAt = now
+            infoMessage = "Request accepted. The session is scheduled."
+        }
+    }
+
+    private func deleteRequest() async {
+        guard viewerRole == .artist else { return }
+        guard isDeletingRequest == false else { return }
+
+        await MainActor.run {
+            errorMessage = nil
+            infoMessage = nil
+            isDeletingRequest = true
+        }
+
+        await viewModel.deleteVideoProjectRequest(request)
+
+        await MainActor.run {
+            defer { isDeletingRequest = false }
+            if let globalError = viewModel.errorMessage {
+                errorMessage = globalError
+            } else {
+                dismiss()
+            }
+        }
+    }
+
+    private func openChat() async {
+        guard isOpeningChat == false else { return }
+        guard let currentUser = appState.currentUser else {
+            await MainActor.run { errorMessage = "Sign in to send a message." }
+            return
+        }
+
+        isOpeningChat = true
+        defer { isOpeningChat = false }
+
+        do {
+            let thread: ChatThread
+            if let existingConversation = request.conversationId {
+                thread = try await di.chatService.thread(withId: existingConversation)
+            } else {
+                guard isVideographer else {
+                    throw VideoRequestDetailError.chatUnavailable
+                }
+                let participants = try buildChatParticipants(excluding: currentUser.id)
+                guard participants.isEmpty == false else {
+                    throw VideoRequestDetailError.missingParticipants
+                }
+
+                let creator = ChatParticipant(user: currentUser)
+                thread = try await di.chatService.createThread(
+                    creator: creator,
+                    participants: participants,
+                    kind: .direct,
+                    groupSettings: nil,
+                    project: nil
+                )
+
+                request.conversationId = thread.id
+                let snapshot = request
+                Task { await viewModel.attachConversation(thread.id, to: snapshot) }
+            }
+
+            await MainActor.run { chatThread = thread }
+        } catch {
+            await MainActor.run {
+                if let detailError = error as? VideoRequestDetailError {
+                    self.errorMessage = detailError.errorDescription
+                } else {
+                    self.errorMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func buildChatParticipants(excluding currentUserId: String) throws -> [ChatParticipant] {
+        var participants: [ChatParticipant] = []
+
+        if request.videographerId != currentUserId {
+            if let profile = viewModel.userProfile(for: request.videographerId) {
+                participants.append(ChatParticipant(user: profile))
+            } else {
+                let name = viewModel.displayName(forUser: request.videographerId)
+                let trimmed = name.trimmed
+                let fallbackUsername = trimmed.isEmpty ? "videographer" : trimmed.replacingOccurrences(of: " ", with: "").lowercased()
+                let placeholder = UserProfile(
+                    id: request.videographerId,
+                    username: fallbackUsername,
+                    displayName: trimmed.isEmpty ? "Videographer" : trimmed,
+                    createdAt: Date(),
+                    profileImageURL: nil,
+                    accountType: .videographer,
+                    profileDetails: AccountProfileDetails(),
+                    contact: UserContactInfo(),
+                    engineerSettings: EngineerSettings(),
+                    videographerSettings: VideographerSettings()
+                )
+                participants.append(ChatParticipant(user: placeholder))
+            }
+        }
+
+        if request.requesterId != currentUserId {
+            if let profile = viewModel.userProfile(for: request.requesterId) {
+                participants.append(ChatParticipant(user: profile))
+            } else {
+                let displayName = request.requesterDisplayName.isEmpty
+                    ? viewModel.displayName(forUser: request.requesterId)
+                    : request.requesterDisplayName
+                let placeholder = UserProfile(
+                    id: request.requesterId,
+                    username: request.requesterUsername,
+                    displayName: displayName.isEmpty ? request.requesterUsername : displayName,
+                    createdAt: Date(),
+                    profileImageURL: nil,
+                    accountType: .artist,
+                    profileDetails: AccountProfileDetails(),
+                    contact: UserContactInfo(),
+                    engineerSettings: EngineerSettings(),
+                    videographerSettings: VideographerSettings()
+                )
+                participants.append(ChatParticipant(user: placeholder))
+            }
+        }
+
+        var unique: [String: ChatParticipant] = [:]
+        for participant in participants where participant.id != currentUserId {
+            unique[participant.id] = participant
+        }
+        return Array(unique.values)
+    }
+
+    private enum VideoRequestDetailError: LocalizedError {
+        case missingParticipants
+        case missingParticipantProfile
+        case chatUnavailable
+
+        var errorDescription: String? {
+            switch self {
+            case .missingParticipants:
+                return "We couldn't assemble a conversation for this request."
+            case .missingParticipantProfile:
+                return "We couldn't load the participant profiles yet."
+            case .chatUnavailable:
+                return "Only the videographer can start this conversation."
+            }
+        }
     }
 }
 
@@ -333,9 +1388,11 @@ private struct BookingListView: View {
     let title: String
     let subtitle: String
     let allowPendingActions: Bool
+    let videoRequests: [VideoProjectRequest]
     let onReschedule: (Booking) -> Void
     let onCancel: (Booking) -> Void
     let onSelect: (Booking) -> Void
+    let onSelectRequest: (VideoProjectRequest) -> Void
 
     private var filteredPending: [Booking] {
         guard viewModel.hideCancelled else { return pending }
@@ -355,6 +1412,10 @@ private struct BookingListView: View {
                         .font(.footnote)
                         .foregroundStyle(.red)
                 }
+            }
+
+            if viewModel.viewerRole == .artist {
+                artistVideoRequestsSection
             }
 
             if filteredPending.isEmpty == false {
@@ -401,6 +1462,55 @@ private struct BookingListView: View {
         .background(Theme.appBackground)
         .refreshable {
             await viewModel.refresh()
+        }
+    }
+
+    private var artistVideoRequestsSection: some View {
+        let pendingRequests = videoRequests.filter { $0.status.isFinal == false }
+        let handledRequests = videoRequests.filter { $0.status.isFinal }
+
+        return Group {
+            Section("Video project requests") {
+                if pendingRequests.isEmpty {
+                    Text("No pending requests.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(pendingRequests) { request in
+                        VideoRequestRow(
+                            request: request,
+                            viewerRole: .artist,
+                            displayName: viewModel.displayName(forUser: request.videographerId),
+                            scheduleLabel: viewModel.videoRequestScheduleLabel(for: request),
+                            createdLabel: viewModel.videoRequestCreatedLabel(for: request),
+                            durationLabel: viewModel.formattedDurationLabel(for: request.durationMinutes),
+                            isProcessing: viewModel.isProcessingVideoRequest(request),
+                            status: request.status,
+                            decisionLabel: viewModel.requesterDecisionLabel(for: request),
+                            onTap: { onSelectRequest(request) }
+                        )
+                    }
+                }
+            }
+
+            if handledRequests.isEmpty == false {
+                Section("Handled requests") {
+                    ForEach(handledRequests) { request in
+                        VideoRequestRow(
+                            request: request,
+                            viewerRole: .artist,
+                            displayName: viewModel.displayName(forUser: request.videographerId),
+                            scheduleLabel: viewModel.videoRequestScheduleLabel(for: request),
+                            createdLabel: viewModel.videoRequestCreatedLabel(for: request),
+                            durationLabel: viewModel.formattedDurationLabel(for: request.durationMinutes),
+                            isProcessing: viewModel.isProcessingVideoRequest(request),
+                            status: request.status,
+                            decisionLabel: viewModel.requesterDecisionLabel(for: request),
+                            onTap: { onSelectRequest(request) }
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -1543,10 +2653,10 @@ private struct PastSessionsLogView: View {
                         }
                     }
                     .listStyle(.insetGrouped)
-                    .scrollContentBackground(.hidden)
-                    .background(Theme.appBackground)
                 }
             }
+            .scrollContentBackground(.hidden)
+            .background(Theme.appBackground)
             .navigationTitle("Session history")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

@@ -44,6 +44,7 @@ struct UserProfile: Identifiable, Equatable, Codable {
     var profileDetails: AccountProfileDetails
     var contact: UserContactInfo
     var engineerSettings: EngineerSettings
+    var videographerSettings: VideographerSettings
     var drivePlan: DrivePlan = .free
 
     var mediaCapabilities: ProfileMediaCapabilities {
@@ -66,6 +67,7 @@ struct UserProfile: Identifiable, Equatable, Codable {
         }
         merged.contact = remote.contact
         merged.engineerSettings = remote.engineerSettings
+        merged.videographerSettings = remote.videographerSettings
         merged.drivePlan = remote.drivePlan
         return merged
     }
@@ -115,6 +117,7 @@ extension UserProfile {
         ),
         contact: UserContactInfo(),
         engineerSettings: EngineerSettings(),
+        videographerSettings: VideographerSettings(),
         drivePlan: .subscribed
     )
 
@@ -151,6 +154,7 @@ extension UserProfile {
         ),
         contact: UserContactInfo(email: "jamie@example.com", phoneNumber: "555-0102"),
         engineerSettings: EngineerSettings(isPremium: true, instantBookEnabled: true),
+        videographerSettings: VideographerSettings(),
         drivePlan: .subscribed
     )
 
@@ -177,6 +181,7 @@ extension UserProfile {
         ),
         contact: UserContactInfo(email: "beats@beatcraft.com", phoneNumber: "555-0112"),
         engineerSettings: EngineerSettings(),
+        videographerSettings: VideographerSettings(),
         drivePlan: .subscribed
     )
 }
@@ -217,5 +222,35 @@ struct EngineerSettings: Codable, Equatable {
 
     var canInstantBook: Bool {
         isPremium && instantBookEnabled
+    }
+}
+
+struct VideographerSettings: Codable, Equatable {
+    var defaultProductionLengthMinutes: Int?
+    var defaultLocationNote: String
+    var defaultBudgetNote: String
+    var projectDetailsTemplate: String
+    var gearRequirements: String
+
+    init(
+        defaultProductionLengthMinutes: Int? = nil,
+        defaultLocationNote: String = "",
+        defaultBudgetNote: String = "",
+        projectDetailsTemplate: String = "",
+        gearRequirements: String = ""
+    ) {
+        self.defaultProductionLengthMinutes = defaultProductionLengthMinutes
+        self.defaultLocationNote = defaultLocationNote
+        self.defaultBudgetNote = defaultBudgetNote
+        self.projectDetailsTemplate = projectDetailsTemplate
+        self.gearRequirements = gearRequirements
+    }
+
+    var hasCustomizations: Bool {
+        defaultProductionLengthMinutes != nil
+            || !defaultLocationNote.trimmed.isEmpty
+            || !defaultBudgetNote.trimmed.isEmpty
+            || !projectDetailsTemplate.trimmed.isEmpty
+            || !gearRequirements.trimmed.isEmpty
     }
 }

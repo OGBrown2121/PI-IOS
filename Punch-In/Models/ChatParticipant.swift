@@ -116,6 +116,7 @@ private extension UserProfile {
         ),
         contact: UserContactInfo(),
         engineerSettings: EngineerSettings(),
+        videographerSettings: VideographerSettings(),
         drivePlan: .subscribed
     )
 
@@ -133,6 +134,7 @@ private extension UserProfile {
         ),
         contact: UserContactInfo(),
         engineerSettings: EngineerSettings(),
+        videographerSettings: VideographerSettings(),
         drivePlan: .subscribed
     )
 }

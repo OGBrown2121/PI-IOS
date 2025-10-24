@@ -145,7 +145,8 @@ final class FirebaseAuthService: AuthService {
             accountType: .artist,
             profileDetails: profileDetails,
             contact: UserContactInfo(email: user.email ?? "", phoneNumber: user.phoneNumber ?? ""),
-            engineerSettings: EngineerSettings()
+            engineerSettings: EngineerSettings(),
+            videographerSettings: VideographerSettings()
         )
     }
 }
@@ -184,7 +185,8 @@ final class MockAuthService: AuthService {
                 fieldTwo: "Songwriter"
             ),
             contact: UserContactInfo(email: "mock@punch.in", phoneNumber: ""),
-            engineerSettings: EngineerSettings()
+            engineerSettings: EngineerSettings(),
+            videographerSettings: VideographerSettings()
         )
         currentUser = user
         return user

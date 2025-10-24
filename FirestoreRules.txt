@@ -672,9 +672,223 @@ service cloud.firestore {
       allow read, update, delete: if false;
     }
 
+    function validVideoProjectRequestStatus(status) {
+      return status in ['pending', 'awaitingRequesterDecision', 'scheduled', 'declined'];
+    }
+
+    function validVideoProjectRequestLocations(locations) {
+      return locations is list && locations.size() <= 12;
+    }
+
+    function validVideoProjectRequestCreate(data) {
+      return data.keys().hasOnly([
+          'videographerId',
+          'requesterId',
+          'requesterDisplayName',
+          'requesterUsername',
+          'startDate',
+          'durationMinutes',
+          'shootLocations',
+          'projectDetails',
+          'status',
+          'createdAt',
+          'updatedAt',
+          'conversationId',
+          'quotedHourlyRate',
+          'videographerRespondedAt',
+          'requesterApprovedQuoteAt',
+          'decisionAt',
+          'decisionBy'
+        ])
+        && data.videographerId is string
+        && data.requesterId is string
+        && data.requesterDisplayName is string
+        && data.requesterUsername is string
+        && data.startDate is timestamp
+        && data.durationMinutes is number
+        && validVideoProjectRequestLocations(data.shootLocations)
+        && data.projectDetails is string
+        && data.status == 'pending'
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp
+        && (!hasField(data, 'conversationId') || data.conversationId == null || data.conversationId is string)
+        && (!hasField(data, 'quotedHourlyRate') || data.quotedHourlyRate == null || data.quotedHourlyRate is number)
+        && (!hasField(data, 'videographerRespondedAt') || data.videographerRespondedAt == null)
+        && (!hasField(data, 'requesterApprovedQuoteAt') || data.requesterApprovedQuoteAt == null)
+        && (!hasField(data, 'decisionAt') || data.decisionAt == null)
+        && (!hasField(data, 'decisionBy') || data.decisionBy == null);
+    }
+
+    function videoProjectRequestBaseUpdate(before, after) {
+      return before.videographerId == after.videographerId
+        && before.requesterId == after.requesterId
+        && before.requesterDisplayName == after.requesterDisplayName
+        && before.requesterUsername == after.requesterUsername
+        && after.startDate is timestamp
+        && after.durationMinutes is number
+        && validVideoProjectRequestLocations(after.shootLocations)
+        && after.projectDetails is string
+        && before.createdAt == after.createdAt
+        && after.updatedAt is timestamp
+        && (!hasField(after, 'conversationId') || after.conversationId == null || after.conversationId is string)
+        && (!hasField(after, 'quotedHourlyRate') || after.quotedHourlyRate == null || after.quotedHourlyRate is number)
+        && (!hasField(after, 'decisionAt') || after.decisionAt == null || after.decisionAt is timestamp)
+        && (!hasField(after, 'decisionBy') || after.decisionBy == null || after.decisionBy is string)
+        && (!hasField(after, 'videographerRespondedAt') || after.videographerRespondedAt == null || after.videographerRespondedAt is timestamp)
+        && (!hasField(after, 'requesterApprovedQuoteAt') || after.requesterApprovedQuoteAt == null || after.requesterApprovedQuoteAt is timestamp)
+        && validVideoProjectRequestStatus(after.status);
+    }
+
+    function pendingConversationUpdateAllowed(before, after) {
+      return before.status == 'pending'
+        && after.status == 'pending'
+        && pendingConversationDetailsMatch(before, after);
+    }
+
+    function pendingConversationDetailsMatch(before, after) {
+      let ratesMatch = (hasField(before, 'quotedHourlyRate') ? before.quotedHourlyRate : null)
+          == (hasField(after, 'quotedHourlyRate') ? after.quotedHourlyRate : null);
+      let respondedMatch = (hasField(before, 'videographerRespondedAt') ? before.videographerRespondedAt : null)
+          == (hasField(after, 'videographerRespondedAt') ? after.videographerRespondedAt : null);
+      let requesterDecisionMatch = (hasField(before, 'requesterDecisionAt') ? before.requesterDecisionAt : (hasField(before, 'requesterApprovedQuoteAt') ? before.requesterApprovedQuoteAt : null))
+          == (hasField(after, 'requesterDecisionAt') ? after.requesterDecisionAt : (hasField(after, 'requesterApprovedQuoteAt') ? after.requesterApprovedQuoteAt : null));
+      let decisionAtMatch = (hasField(before, 'decisionAt') ? before.decisionAt : null)
+          == (hasField(after, 'decisionAt') ? after.decisionAt : null);
+      let decisionByMatch = (hasField(before, 'decisionBy') ? before.decisionBy : null)
+          == (hasField(after, 'decisionBy') ? after.decisionBy : null);
+      let beforeConversation = hasField(before, 'conversationId') ? before.conversationId : null;
+      let afterConversation = hasField(after, 'conversationId') ? after.conversationId : null;
+      let conversationAllowed = (afterConversation == beforeConversation)
+          || (beforeConversation == null && afterConversation is string);
+
+      return before.startDate == after.startDate
+        && before.durationMinutes == after.durationMinutes
+        && before.shootLocations == after.shootLocations
+        && before.projectDetails == after.projectDetails
+        && ratesMatch
+        && respondedMatch
+        && requesterDecisionMatch
+        && decisionAtMatch
+        && decisionByMatch
+        && conversationAllowed;
+    }
+
+    function awaitingRequesterDecisionUpdateAllowed(before, after) {
+      return before.status in ['pending', 'awaitingRequesterDecision']
+        && after.status == 'awaitingRequesterDecision'
+        && request.auth.uid == before.videographerId
+        && hasField(after, 'videographerRespondedAt') && after.videographerRespondedAt is timestamp
+        && (!hasField(after, 'decisionAt') || after.decisionAt == null)
+        && (!hasField(after, 'decisionBy') || after.decisionBy == null);
+    }
+
+    function declineUpdateAllowed(before, after) {
+      return before.status in ['pending', 'awaitingRequesterDecision']
+        && after.status == 'declined'
+        && request.auth.uid == before.videographerId
+        && hasField(after, 'decisionAt') && after.decisionAt is timestamp
+        && hasField(after, 'decisionBy') && after.decisionBy == request.auth.uid
+        && (!hasField(after, 'requesterDecisionAt') || after.requesterDecisionAt == null)
+        && (!hasField(after, 'requesterApprovedQuoteAt') || after.requesterApprovedQuoteAt == null)
+        && (!hasField(after, 'videographerRespondedAt') || after.videographerRespondedAt is timestamp);
+    }
+
+    function validVideoProjectRequestUpdateByVideographer(before, after) {
+      return (!hasField(after, 'videographerId') || after.videographerId == before.videographerId)
+        && (!hasField(after, 'requesterId') || after.requesterId == before.requesterId)
+        && (!hasField(after, 'requesterDisplayName') || after.requesterDisplayName == before.requesterDisplayName)
+        && (!hasField(after, 'requesterUsername') || after.requesterUsername == before.requesterUsername)
+        && (!hasField(after, 'createdAt') || after.createdAt == before.createdAt)
+        && after.updatedAt is timestamp
+        && (
+          pendingConversationUpdateAllowed(before, after)
+          || awaitingRequesterDecisionUpdateAllowed(before, after)
+          || declineUpdateAllowed(before, after)
+        );
+    }
+
+    function validVideoProjectRequestUpdateByRequester(before, after) {
+      return videoProjectRequestBaseUpdate(before, after)
+        && before.status == 'awaitingRequesterDecision'
+        && request.auth.uid == before.requesterId
+        && after.status == 'scheduled'
+        && before.startDate == after.startDate
+        && before.durationMinutes == after.durationMinutes
+        && before.shootLocations == after.shootLocations
+        && before.projectDetails == after.projectDetails
+        && (
+          (!hasField(before, 'quotedHourlyRate') && !hasField(after, 'quotedHourlyRate'))
+          || (hasField(before, 'quotedHourlyRate') && hasField(after, 'quotedHourlyRate') && before.quotedHourlyRate == after.quotedHourlyRate)
+        )
+        && (
+          (!hasField(before, 'conversationId') && !hasField(after, 'conversationId'))
+          || (hasField(before, 'conversationId') && hasField(after, 'conversationId') && before.conversationId == after.conversationId)
+        )
+        && hasField(after, 'decisionAt') && after.decisionAt is timestamp
+        && hasField(after, 'decisionBy') && after.decisionBy == request.auth.uid
+        && hasField(after, 'requesterApprovedQuoteAt') && after.requesterApprovedQuoteAt is timestamp
+        && (!hasField(after, 'videographerRespondedAt') || after.videographerRespondedAt == before.videographerRespondedAt);
+    }
+
+    function validVideographerSettingsMap(settings) {
+      return settings == null
+          || (
+            settings is map
+            && settings.keys().hasOnly([
+              'defaultProductionLengthMinutes',
+              'defaultLocationNote',
+              'defaultBudgetNote',
+              'projectDetailsTemplate',
+              'gearRequirements'
+            ])
+            && (!hasField(settings, 'defaultProductionLengthMinutes') || settings.defaultProductionLengthMinutes is number)
+            && (!hasField(settings, 'defaultLocationNote') || settings.defaultLocationNote is string)
+            && (!hasField(settings, 'defaultBudgetNote') || settings.defaultBudgetNote is string)
+            && (!hasField(settings, 'projectDetailsTemplate') || settings.projectDetailsTemplate is string)
+            && (!hasField(settings, 'gearRequirements') || settings.gearRequirements is string)
+          );
+    }
+
+    function validVideographerSettings(data) {
+      return !hasField(data, 'videographerSettings')
+          || validVideographerSettingsMap(data.videographerSettings);
+    }
+
+    match /videoProjectRequests/{requestId} {
+      allow read: if isSignedIn()
+          && resource != null
+          && (resource.data.videographerId == request.auth.uid || resource.data.requesterId == request.auth.uid);
+      allow create: if isSignedIn()
+          && (
+            request.resource.data.requesterId == request.auth.uid
+            || request.resource.data.videographerId == request.auth.uid
+          )
+          && request.resource.data.status == 'pending';
+      allow update: if isSignedIn()
+          && resource != null
+          && (
+            (resource.data.videographerId == request.auth.uid
+              && validVideoProjectRequestUpdateByVideographer(resource.data, request.resource.data))
+            ||
+            (resource.data.requesterId == request.auth.uid
+              && validVideoProjectRequestUpdateByRequester(resource.data, request.resource.data))
+          );
+      allow delete: if isSignedIn()
+          && resource != null
+          && (
+            (resource.data.requesterId == request.auth.uid
+              && resource.data.status in ['pending', 'awaitingRequesterDecision'])
+            ||
+            (resource.data.videographerId == request.auth.uid
+              && resource.data.status == 'pending')
+          );
+    }
+
     match /users/{userId} {
       allow read: if true;
-      allow write: if request.auth != null && request.auth.uid == userId;
+      allow write: if request.auth != null
+          && request.auth.uid == userId
+          && validVideographerSettings(request.resource.data);
 
       match /followers/{followerId} {
         allow read: if isSignedIn();

@@ -348,6 +348,7 @@ final class FirestoreChatService: ChatService {
                 profileDetails: profile.profileDetails,
                 contact: profile.contact,
                 engineerSettings: profile.engineerSettings,
+                videographerSettings: profile.videographerSettings,
                 drivePlan: profile.drivePlan
             )
             return ChatParticipant(user: normalizedProfile)
@@ -918,6 +919,7 @@ final class FirestoreChatService: ChatService {
                 profileDetails: details,
                 contact: UserContactInfo(),
                 engineerSettings: EngineerSettings(),
+                videographerSettings: VideographerSettings(),
                 drivePlan: drivePlan
             )
             return ChatParticipant(user: profile)
@@ -1131,6 +1133,7 @@ final class FirestoreChatService: ChatService {
             profileDetails: details,
             contact: UserContactInfo(),
             engineerSettings: EngineerSettings(),
+            videographerSettings: VideographerSettings(),
             drivePlan: drivePlan
         )
     }

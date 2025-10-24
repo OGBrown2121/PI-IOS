@@ -163,6 +163,24 @@ private extension SettingsView {
                 .buttonStyle(.plain)
             }
 
+            if profile.accountType == .videographer {
+                NavigationLink {
+                    VideographerBookingSettingsView(
+                        viewModel: VideographerBookingSettingsViewModel(
+                            profile: profile,
+                            firestore: di.firestoreService,
+                            currentUserProvider: { appState.currentUser },
+                            onProfileUpdate: { updated in
+                                appState.currentUser = updated
+                            }
+                        )
+                    )
+                } label: {
+                    liquidAction(title: "Booking Defaults", icon: "list.clipboard", chevron: true)
+                }
+                .buttonStyle(.plain)
+            }
+
             if profile.accountType.supportsProfileMediaLibrary {
                 NavigationLink {
                     ProfileMediaLibraryView(

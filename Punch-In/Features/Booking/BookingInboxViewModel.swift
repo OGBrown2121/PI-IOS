@@ -8,6 +8,7 @@ final class BookingInboxViewModel: ObservableObject {
         case engineer
         case artist
         case studioOwner
+        case videographer
     }
 
     enum DisplayMode: String, CaseIterable, Identifiable {
@@ -64,6 +65,10 @@ final class BookingInboxViewModel: ObservableObject {
     @Published private(set) var isLoadingOpenTimes = false
     @Published private(set) var openTimesMessage: String?
     @Published private(set) var openTimesError: String?
+    @Published private(set) var pendingVideoRequests: [VideoProjectRequest] = []
+    @Published private(set) var completedVideoRequests: [VideoProjectRequest] = []
+    @Published private(set) var sentVideoRequests: [VideoProjectRequest] = []
+    @Published private var videoRequestActionsInFlight: Set<String> = []
 
     private let bookingService: any BookingService
     private let firestore: any FirestoreService
@@ -156,8 +161,19 @@ final class BookingInboxViewModel: ObservableObject {
         viewerRole = role(for: user.accountType)
         errorMessage = nil
 
-        if viewerRole != .engineer && displayMode == .openTimes {
+        if viewerRole == .videographer {
             displayMode = .list
+        } else if viewerRole != .engineer && displayMode == .openTimes {
+            displayMode = .list
+        }
+
+        if viewerRole != .videographer {
+            pendingVideoRequests = []
+            completedVideoRequests = []
+            videoRequestActionsInFlight.removeAll()
+        }
+        if viewerRole != .artist {
+            sentVideoRequests = []
         }
 
         switch viewerRole {
@@ -169,6 +185,9 @@ final class BookingInboxViewModel: ObservableObject {
         case .studioOwner:
             resetOpenTimes()
             await loadStudioBookings(for: user)
+        case .videographer:
+            resetOpenTimes()
+            await loadVideographerRequests(for: user)
         case .unsupported, .unknown:
             resetOpenTimes()
             pendingApprovals = []
@@ -178,11 +197,144 @@ final class BookingInboxViewModel: ObservableObject {
             engineerProfiles = [:]
             pendingReviews = []
             cachedBookings = []
+            pendingVideoRequests = []
+            completedVideoRequests = []
+            sentVideoRequests = []
         }
     }
 
     func isPerformingAction(for booking: Booking) -> Bool {
         actionInFlight.contains(booking.id)
+    }
+
+    func isProcessingVideoRequest(_ request: VideoProjectRequest) -> Bool {
+        videoRequestActionsInFlight.contains(request.id)
+    }
+
+    func sendVideoProjectProposal(
+        _ request: VideoProjectRequest,
+        startDate: Date,
+        durationMinutes: Int,
+        shootLocations: [String],
+        quotedRate: Double?
+    ) async {
+        guard let user = currentUserProvider(), viewerRole == .videographer else { return }
+        guard videoRequestActionsInFlight.contains(request.id) == false else { return }
+
+        videoRequestActionsInFlight.insert(request.id)
+        defer { videoRequestActionsInFlight.remove(request.id) }
+
+        let sanitizedLocations = Array(
+            shootLocations
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.isEmpty == false }
+            .prefix(12)
+        )
+        let hasRateChange = request.quotedHourlyRate != quotedRate
+        let hasScheduleChange = request.startDate != startDate || request.durationMinutes != durationMinutes
+        let hasLocationChange = request.shootLocations != sanitizedLocations
+
+        guard hasRateChange || hasScheduleChange || hasLocationChange else {
+            await MainActor.run { self.errorMessage = "No changes to send." }
+            return
+        }
+
+        var updated = request
+        updated.startDate = startDate
+        updated.durationMinutes = durationMinutes
+        updated.shootLocations = sanitizedLocations
+        updated.quotedHourlyRate = quotedRate
+        updated.status = .awaitingRequesterDecision
+        errorMessage = nil
+
+        let now = Date()
+        updated.updatedAt = now
+        updated.videographerRespondedAt = now
+        updated.requesterDecisionAt = nil
+        updated.decisionAt = nil
+        updated.decisionBy = nil
+
+        do {
+            try await firestore.updateVideoProjectRequest(updated)
+            errorMessage = nil
+            await loadVideographerRequests(for: user)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func declineVideoProjectRequest(_ request: VideoProjectRequest) async {
+        guard let user = currentUserProvider(), viewerRole == .videographer else { return }
+        guard request.status == .pending || request.status == .awaitingRequesterDecision else { return }
+        guard videoRequestActionsInFlight.contains(request.id) == false else { return }
+
+        videoRequestActionsInFlight.insert(request.id)
+        defer { videoRequestActionsInFlight.remove(request.id) }
+
+        errorMessage = nil
+
+        var updated = request
+        let now = Date()
+        updated.status = .declined
+        updated.updatedAt = now
+        updated.decisionAt = now
+        updated.decisionBy = user.id
+        updated.requesterDecisionAt = nil
+        updated.videographerRespondedAt = now
+
+        do {
+            try await firestore.updateVideoProjectRequest(updated)
+            errorMessage = nil
+            await loadVideographerRequests(for: user)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func acceptVideoProjectRequest(_ request: VideoProjectRequest) async {
+        guard let user = currentUserProvider(), viewerRole == .artist else { return }
+        guard request.status == .awaitingRequesterDecision else { return }
+        guard videoRequestActionsInFlight.contains(request.id) == false else { return }
+
+        videoRequestActionsInFlight.insert(request.id)
+        defer { videoRequestActionsInFlight.remove(request.id) }
+
+        errorMessage = nil
+
+        var updated = request
+        let now = Date()
+        updated.status = .scheduled
+        updated.updatedAt = now
+        updated.requesterDecisionAt = now
+        updated.decisionAt = now
+        updated.decisionBy = user.id
+
+        do {
+            try await firestore.updateVideoProjectRequest(updated)
+            errorMessage = nil
+            await loadArtistBookings(for: user)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func deleteVideoProjectRequest(_ request: VideoProjectRequest) async {
+        guard let user = currentUserProvider(), viewerRole == .artist else { return }
+        guard request.status == .pending || request.status == .awaitingRequesterDecision else { return }
+        guard videoRequestActionsInFlight.contains(request.id) == false else { return }
+
+        videoRequestActionsInFlight.insert(request.id)
+        defer { videoRequestActionsInFlight.remove(request.id) }
+
+        errorMessage = nil
+
+        do {
+            try await firestore.deleteVideoProjectRequest(request.id)
+            errorMessage = nil
+            await loadArtistBookings(for: user)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     func canAct(on booking: Booking) -> Bool {
@@ -512,7 +664,11 @@ final class BookingInboxViewModel: ObservableObject {
     private func loadArtistBookings(for user: UserProfile) async {
         do {
             ownedStudioIds = []
-            let bookings = try await bookingService.fetchBookings(for: user.id, role: .artist)
+            async let bookingsTask = bookingService.fetchBookings(for: user.id, role: .artist)
+            async let requestsTask = firestore.fetchVideoProjectRequestsForRequester(user.id)
+
+            let bookings = try await bookingsTask
+            let requests = try await requestsTask
             let sorted = bookings.sorted { $0.requestedStart < $1.requestedStart }
             let now = Date()
             let historical = sorted.filter { isPastBooking($0, relativeTo: now) }
@@ -522,6 +678,8 @@ final class BookingInboxViewModel: ObservableObject {
             scheduledBookings = upcoming
             await resolveMetadata(for: sorted)
             updateCalendarData(with: calendarEligible)
+            await resolveVideoRequestMetadata(requests)
+            sentVideoRequests = requests.sorted { $0.updatedAt > $1.updatedAt }
             pastBookings = historical
             pendingApprovals = []
             await rebuildPendingReviews(with: sorted, for: user, role: .artist)
@@ -533,6 +691,7 @@ final class BookingInboxViewModel: ObservableObject {
             pastBookings = []
             pendingReviews = []
             cachedBookings = []
+            sentVideoRequests = []
         }
     }
 
@@ -597,12 +756,39 @@ final class BookingInboxViewModel: ObservableObject {
         }
     }
 
+    private func loadVideographerRequests(for user: UserProfile) async {
+        do {
+            pendingApprovals = []
+            scheduledBookings = []
+            pastBookings = []
+            calendarBookings = []
+            cachedBookings = []
+            pendingReviews = []
+            let requests = try await firestore.fetchVideoProjectRequests(for: user.id)
+            await resolveVideoRequestMetadata(requests)
+            pendingVideoRequests = requests
+                .filter { $0.status.isFinal == false }
+                .sorted { $0.updatedAt > $1.updatedAt }
+            completedVideoRequests = requests
+                .filter { $0.status.isFinal }
+                .sorted { $0.updatedAt > $1.updatedAt }
+            errorMessage = nil
+        } catch {
+            pendingVideoRequests = []
+            completedVideoRequests = []
+            errorMessage = error.localizedDescription
+        }
+    }
+
     private func role(for accountType: AccountType) -> ViewerRole {
         if accountType.isEngineer {
             return .engineer
         }
         if accountType.isStudioOwner {
             return .studioOwner
+        }
+        if accountType == .videographer {
+            return .videographer
         }
         if accountType.canInitiateBookings {
             return .artist
@@ -724,6 +910,82 @@ final class BookingInboxViewModel: ObservableObject {
         }
     }
 
+    private func resolveVideoRequestMetadata(_ requests: [VideoProjectRequest]) async {
+        guard requests.isEmpty == false else { return }
+
+        for request in requests {
+            if userNames[request.requesterId] == nil {
+                userNames[request.requesterId] = request.requesterDisplayName
+            }
+        }
+
+        let participantIds = Set(requests.flatMap { [ $0.requesterId, $0.videographerId ] })
+        let missingProfiles = participantIds.filter { userProfiles[$0] == nil }
+        guard missingProfiles.isEmpty == false else { return }
+
+        do {
+            let profiles = try await firestore.fetchUserProfiles(for: Array(missingProfiles))
+            for profile in profiles {
+                userProfiles[profile.id] = profile
+                let trimmedName = profile.displayName.trimmed
+                userNames[profile.id] = trimmedName.isEmpty ? "@\(profile.username)" : trimmedName
+            }
+        } catch {
+            #if DEBUG
+            print("[BookingInbox] failed to resolve video request metadata error=\(error)")
+            #endif
+        }
+    }
+
+    func formattedDurationLabel(for minutes: Int) -> String {
+        let hours = minutes / 60
+        let remainder = minutes % 60
+        switch (hours, remainder) {
+        case (0, let mins):
+            return "\(mins)m"
+        case (let hrs, 0):
+            return "\(hrs)h"
+        default:
+            return "\(hours)h \(remainder)m"
+        }
+    }
+
+    func videoRequestScheduleLabel(for request: VideoProjectRequest) -> String {
+        Self.videoRequestDateFormatter.string(from: request.startDate)
+    }
+
+    func videoRequestCreatedLabel(for request: VideoProjectRequest) -> String {
+        Self.videoRequestCreatedFormatter.string(from: request.createdAt)
+    }
+
+    func formattedTimestamp(_ date: Date) -> String {
+        Self.videoRequestCreatedFormatter.string(from: date)
+    }
+
+    func requesterDecisionLabel(for request: VideoProjectRequest) -> String? {
+        if let decisionAt = request.requesterDecisionAt {
+            return formattedTimestamp(decisionAt)
+        }
+        if request.status == .declined, let declinedAt = request.decisionAt {
+            return formattedTimestamp(declinedAt)
+        }
+        return nil
+    }
+
+    private static let videoRequestDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
+
+    private static let videoRequestCreatedFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
+
     private func rebuildPendingReviews(with bookings: [Booking], for user: UserProfile, role: ViewerRole) async {
         guard bookings.contains(where: { $0.status == .completed }) else {
             pendingReviews = []
@@ -808,6 +1070,8 @@ final class BookingInboxViewModel: ObservableObject {
             if authoredReviews[key] == nil {
                 targets.append(ReviewTarget(revieweeId: booking.artistId, revieweeKind: .artist))
             }
+        case .videographer:
+            break
         case .unsupported, .unknown:
             break
         }
@@ -964,6 +1228,8 @@ final class BookingInboxViewModel: ObservableObject {
             return [.list, .calendar, .openTimes]
         case .studioOwner:
             return [.list, .calendar, .schedule]
+        case .videographer:
+            return [.list]
         default:
             return [.list, .calendar]
         }
@@ -1005,6 +1271,26 @@ final class BookingInboxViewModel: ObservableObject {
         do {
             try await bookingService.updateBooking(updated)
             await refresh()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func attachConversation(_ conversationId: String, to request: VideoProjectRequest) async {
+        guard request.conversationId != conversationId else { return }
+        guard let user = currentUserProvider(), request.videographerId == user.id else { return }
+        guard videoRequestActionsInFlight.contains(request.id) == false else { return }
+
+        videoRequestActionsInFlight.insert(request.id)
+        defer { videoRequestActionsInFlight.remove(request.id) }
+
+        var updated = request
+        updated.conversationId = conversationId
+        updated.updatedAt = Date()
+
+        do {
+            try await firestore.updateVideoProjectRequest(updated)
+            await loadVideographerRequests(for: user)
         } catch {
             errorMessage = error.localizedDescription
         }
